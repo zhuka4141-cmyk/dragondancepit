@@ -2,7 +2,7 @@
 
 公开站点：https://zhuka4141-cmyk.github.io/fku-rj-viewer/
 
-纯静态 Three.js 0.169.0 查看器，保留原有界面。GitHub Pages 发布来源为 `main` + `/(root)`。
+纯静态 Three.js 0.169.0 查看器，使用正交投影消除透视畸变，保留原有界面。GitHub Pages 发布来源为 `main` + `/(root)`。
 
 - 电脑：左键旋转，滚轮缩放，右键平移。
 - 手机：一指旋转，双指缩放和平移。

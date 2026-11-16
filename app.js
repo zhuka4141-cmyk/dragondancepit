@@ -37,7 +37,8 @@ stage.appendChild(renderer.domElement);
 
 /* ---------------- 场景 / 相机 ---------------- */
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.01, 20000);
+const initialAspect = window.innerWidth / window.innerHeight;
+const camera = new THREE.OrthographicCamera(-5 * initialAspect, 5 * initialAspect, 5, -5, 0.01, 20000);
 camera.position.set(5, 4, 7);
 
 const pmrem = new THREE.PMREMGenerator(renderer);
@@ -160,14 +161,16 @@ function onLoaded(gltf) {
   /* 相机包围球 */
   const sphere = fitted.getBoundingSphere(new THREE.Sphere());
   modelRadius = sphere.radius;
-  homeDist = getFitDistance();
+  homeDist = modelRadius * 3;
+  camera.zoom = 1;
+  fitOrthographicCamera();
 
   camera.near = Math.max(homeDist / 5000, 0.001);
   camera.far = homeDist * 60;
   camera.updateProjectionMatrix();
 
-  controls.minDistance = modelRadius * 0.06;
-  controls.maxDistance = modelRadius * 12;
+  controls.minZoom = 0.1;
+  controls.maxZoom = 20;
   homeTarget.copy(sphere.center);
   controls.target.copy(homeTarget);
 
@@ -220,11 +223,16 @@ function onLoaded(gltf) {
   console.log(`[viewer] meshes=${meshes} triangles=${tris} units(step)=${w}x${d}x${h}`);
 }
 
-/* 横向视场角在竖屏时更小，必须同时计算才能完整显示包围球。 */
-function getFitDistance() {
-  const vertical = THREE.MathUtils.degToRad(camera.fov);
-  const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * camera.aspect);
-  return modelRadius / Math.sin(Math.min(vertical, horizontal) / 2) * 1.12;
+/* 正交投影消除近大远小；按短边适配模型，兼容手机竖屏。 */
+function fitOrthographicCamera() {
+  const aspect = window.innerWidth / window.innerHeight;
+  const halfHeight = modelRadius * 1.12 / Math.min(aspect, 1);
+  const halfWidth = halfHeight * aspect;
+  camera.left = -halfWidth;
+  camera.right = halfWidth;
+  camera.top = halfHeight;
+  camera.bottom = -halfHeight;
+  camera.updateProjectionMatrix();
 }
 
 /* ---------------- 视角飞行 ---------------- */
@@ -420,6 +428,8 @@ $('btn-edges').addEventListener('click', (e) => {
 });
 
 $('btn-reset').addEventListener('click', () => {
+  camera.zoom = 1;
+  camera.updateProjectionMatrix();
   controls.target.copy(homeTarget);
   flyTo(homeDir, 800);
 });
@@ -455,18 +465,8 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('resize', () => {
   const w = window.innerWidth;
   const h = window.innerHeight;
-  const previousHomeDist = homeDist;
-  camera.aspect = w / h;
   renderer.setSize(w, h);
-  if (document.body.classList.contains('ready')) {
-    homeDist = getFitDistance();
-    const offset = camera.position.clone().sub(controls.target);
-    camera.position.copy(controls.target).addScaledVector(offset, homeDist / previousHomeDist);
-    camera.near = Math.max(homeDist / 5000, 0.001);
-    camera.far = homeDist * 60;
-    tween = null;
-  }
-  camera.updateProjectionMatrix();
+  fitOrthographicCamera();
   controls.update();
 });
 

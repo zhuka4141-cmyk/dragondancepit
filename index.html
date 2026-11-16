@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<link rel="icon" href="data:," />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>FKU RJ · 3D 数字档案</title>
+<meta name="description" content="STEP 模型在线 360° 无死角查看器" />
+<style>
+  :root{
+    --bg-0:#080b12;
+    --bg-1:#0e1420;
+    --panel:rgba(16,22,34,.72);
+    --panel-brd:rgba(120,160,230,.16);
+    --txt:#e7eefc;
+    --txt-dim:#8fa0bf;
+    --accent:#4ea8ff;
+    --accent-2:#7de2c3;
+    --shadow:0 12px 34px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:
+      radial-gradient(1200px 800px at 70% -10%, #16233a 0%, transparent 60%),
+      radial-gradient(900px 700px at 10% 110%, #10202a 0%, transparent 55%),
+      linear-gradient(180deg,#0a0e16 0%,#070a10 100%);
+    color:var(--txt);
+    font-family:"Segoe UI","Microsoft YaHei",-apple-system,BlinkMacSystemFont,sans-serif;
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  #stage{position:fixed;inset:0}
+  canvas{display:block;touch-action:none;outline:none}
+
+  /* ---------- 加载 ---------- */
+  #loader{
+    position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:18px;
+    background:radial-gradient(700px 500px at 50% 45%,#101828 0%,#070a10 70%);
+    transition:opacity .6s ease, visibility .6s;
+  }
+  #loader.hidden{opacity:0;visibility:hidden}
+  .ring{
+    width:74px;height:74px;border-radius:50%;
+    border:2px solid rgba(120,170,255,.14);
+    border-top-color:var(--accent);
+    border-right-color:rgba(125,226,195,.75);
+    animation:spin 1s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #loader .lbl{font-size:13px;letter-spacing:.22em;color:var(--txt-dim);text-transform:uppercase}
+  #loader .sub{font-size:12px;color:#5d6d88;letter-spacing:.06em}
+  .bar{width:min(320px,60vw);height:3px;border-radius:3px;background:rgba(120,170,255,.12);overflow:hidden}
+  .bar > i{display:block;height:100%;width:0;border-radius:3px;
+    background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .25s ease}
+  #pct{font-variant-numeric:tabular-nums;font-size:12px;color:var(--txt-dim);letter-spacing:.1em}
+
+  /* ---------- 面板通用 ---------- */
+  .panel{
+    background:var(--panel);
+    border:1px solid var(--panel-brd);
+    border-radius:14px;
+    backdrop-filter:blur(14px) saturate(140%);
+    -webkit-backdrop-filter:blur(14px) saturate(140%);
+    box-shadow:var(--shadow);
+  }
+  .hud{position:fixed;z-index:10}
+
+  /* ---------- 左上：档案标题 ---------- */
+  #title{top:20px;left:20px;padding:16px 20px 14px;min-width:230px}
+  #title .kicker{
+    font-size:10px;letter-spacing:.3em;color:var(--accent);
+    text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:8px
+  }
+  #title .kicker::before{content:"";width:16px;height:1px;background:var(--accent);display:block}
+  #title h1{margin:0;font-size:21px;font-weight:600;letter-spacing:.02em;line-height:1.2}
+  #title h1 span{color:var(--accent-2);font-weight:400}
+  #title .meta{margin-top:10px;font-size:11.5px;color:var(--txt-dim);letter-spacing:.04em;line-height:1.9}
+  #title .meta b{color:#cfdcf2;font-weight:500;font-variant-numeric:tabular-nums}
+  #title .hint{margin-top:10px;padding-top:10px;border-top:1px solid rgba(120,160,230,.12);
+    font-size:11px;color:#6b7c9b;letter-spacing:.03em;line-height:1.7}
+
+  /* ---------- 右上：视角 ---------- */
+  #views{top:20px;right:20px;padding:10px;display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+  #views .cap{
+    grid-column:1/-1;font-size:10px;letter-spacing:.24em;color:var(--txt-dim);
+    text-transform:uppercase;padding:2px 4px 6px
+  }
+  button{
+    font-family:inherit;font-size:12.5px;color:var(--txt);cursor:pointer;
+    background:rgba(255,255,255,.045);border:1px solid rgba(130,170,235,.14);
+    border-radius:9px;padding:8px 10px;transition:.18s ease;white-space:nowrap;
+  }
+  button:hover{background:rgba(78,168,255,.16);border-color:rgba(78,168,255,.5);transform:translateY(-1px)}
+  button:active{transform:translateY(0)}
+  button.on{background:rgba(78,168,255,.22);border-color:rgba(78,168,255,.7);color:#fff;
+    box-shadow:0 0 0 1px rgba(78,168,255,.25),0 6px 18px rgba(30,120,220,.28)}
+
+  /* ---------- 底部工具条 ---------- */
+  #dock{
+    left:50%;bottom:26px;transform:translateX(-50%);
+    padding:8px;display:flex;gap:6px;align-items:center;
+  }
+  #dock .sep{width:1px;height:22px;background:rgba(130,170,235,.16);margin:0 4px}
+  #dock button{display:flex;align-items:center;gap:7px;padding:9px 13px}
+  #dock svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.6;
+    stroke-linecap:round;stroke-linejoin:round;opacity:.9}
+
+  /* ---------- 右下：坐标轴 ---------- */
+  #gizmo-hint{
+    right:16px;bottom:14px;font-size:10px;letter-spacing:.18em;color:#4d5c78;
+    text-transform:uppercase;z-index:8;pointer-events:none
+  }
+
+  /* ---------- 错误 ---------- */
+  #err{
+    left:50%;top:50%;transform:translate(-50%,-50%);display:none;
+    padding:22px 26px;max-width:min(520px,86vw);text-align:center;line-height:1.8
+  }
+  #err h2{margin:0 0 8px;font-size:16px;color:#ff8a8a}
+  #err code{font-size:11.5px;color:var(--txt-dim);word-break:break-all}
+
+  @media (max-width:760px){
+    #title{top:12px;left:12px;max-width:calc(100vw - 156px);min-width:0;padding:12px 15px}
+    #title h1{font-size:16px}
+    #title .hint{display:none}
+    #views{top:12px;right:12px;grid-template-columns:repeat(2,1fr);padding:8px}
+    #dock{bottom:14px;gap:4px;padding:6px}
+    #dock button{padding:8px 9px;font-size:11.5px}
+    #dock button span{display:none}
+    #gizmo-hint{display:none}
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<!-- 左上档案卡 -->
+<section id="title" class="hud panel">
+  <div class="kicker">Digital Archive</div>
+  <h1>FKU RJ <span>· 3D 档案</span></h1>
+  <div class="meta">
+    <div>格式 <b id="m-format">STEP AP214 → GLB</b></div>
+    <div>外包尺寸 <b id="m-size">—</b></div>
+    <div>构件 <b id="m-parts">—</b> · 三角面 <b id="m-tris">—</b></div>
+  </div>
+  <div class="hint">左键拖拽旋转 · 滚轮缩放 · 右键平移<br>支持 360° 全角度无死角查看</div>
+</section>
+
+<!-- 右上视角 -->
+<section id="views" class="hud panel">
+  <div class="cap">Views</div>
+  <button data-view="front">前视</button>
+  <button data-view="back">后视</button>
+  <button data-view="left">左视</button>
+  <button data-view="right">右视</button>
+  <button data-view="top">俯视</button>
+  <button data-view="bottom">仰视</button>
+  <button data-view="iso" style="grid-column:1/-1">等轴测视角</button>
+</section>
+
+<!-- 底部工具条 -->
+<nav id="dock" class="hud panel">
+  <button id="btn-rotate" class="on" title="自动旋转 (R)">
+    <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/></svg>
+    <span>自动旋转</span>
+  </button>
+  <button id="btn-wire" title="线框 (W)">
+    <svg viewBox="0 0 24 24"><path d="M12 2 22 8v8l-10 6L2 16V8z"/><path d="M2 8l10 6 10-6M12 14v8"/></svg>
+    <span>线框</span>
+  </button>
+  <button id="btn-grid" class="on" title="网格 (G)">
+    <svg viewBox="0 0 24 24"><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>
+    <span>网格</span>
+  </button>
+  <button id="btn-edges" title="轮廓线 (E)">
+    <svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M4 12h16M12 6v12"/></svg>
+    <span>轮廓</span>
+  </button>
+  <div class="sep"></div>
+  <button id="btn-reset" title="复位视角 (0)">
+    <svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></svg>
+    <span>复位</span>
+  </button>
+  <button id="btn-shot" title="截图保存">
+    <svg viewBox="0 0 24 24"><path d="M4 8h3l2-2h6l2 2h3v11H4z"/><circle cx="12" cy="13" r="3.4"/></svg>
+    <span>截图</span>
+  </button>
+  <button id="btn-full" title="全屏">
+    <svg viewBox="0 0 24 24"><path d="M9 3H3v6M15 3h6v6M21 15v6h-6M3 15v6h6"/></svg>
+    <span>全屏</span>
+  </button>
+</nav>
+
+<div id="gizmo-hint" class="hud">Drag to orbit</div>
+
+<!-- 加载 -->
+<div id="loader">
+  <div class="ring"></div>
+  <div class="lbl">Loading Archive</div>
+  <div class="bar"><i id="bar"></i></div>
+  <div id="pct">0%</div>
+  <div class="sub">正在解析 STEP 几何体…</div>
+</div>
+
+<!-- 错误 -->
+<div id="err" class="hud panel">
+  <h2>模型载入失败</h2>
+  <div>请确认 <code>model/fku_rj.glb</code> 已上传，并通过 HTTP 服务访问本页面（不要直接双击打开 html）。</div>
+  <div><code id="err-msg"></code></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import('./app.js?v=20261116-1').catch((error) => {
+  console.error(error);
+  document.getElementById('loader').classList.add('hidden');
+  document.getElementById('err').style.display = 'block';
+  document.getElementById('err-msg').textContent = error?.message || String(error);
+});
+</script>
+</body>
+</html>

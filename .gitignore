@@ -1,0 +1,6 @@
+*.step
+*.stp
+*.report.json
+__pycache__/
+.DS_Store
+Thumbs.db

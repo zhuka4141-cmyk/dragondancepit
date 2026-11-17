@@ -109,7 +109,7 @@ function setProgress(v) {
 }
 
 new GLTFLoader().load(
-  MODEL_URL,
+  `${MODEL_URL}?v=20261117-63c48f80d519`,
   onLoaded,
   (evt) => {
     if (evt.lengthComputable && evt.total > 0) {

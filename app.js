@@ -3,9 +3,10 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { createPaintTools } from './paint-tools.js?v=paint-stick-1';
+import { createPaintTools } from './paint-tools.js?v=bilingual-1';
 import { createCameraStick } from './camera-stick.js?v=paint-stick-1';
-import { createExplodedView, EXPLODE_DURATION_MS } from './exploded-view.js?v=surface-tools-1';
+import { createExplodedView, EXPLODE_DURATION_MS } from './exploded-view.js?v=bilingual-1';
+import { t, onLanguageChange } from './i18n.js';
 
 const MODEL_URL = new URL('./model/dragondance.glb', import.meta.url);
 // Fallback for static HTTP previews where Web Crypto is unavailable.
@@ -176,7 +177,7 @@ function onLoaded(gltf, modelKey) {
   paintTools = createPaintTools({
     surface, camera, controls, model, meshes: explosion.meshes, modelKey,
     modelRadius: assembledRadius,
-    nameForMesh: (mesh) => explosion.partForMesh(mesh)?.name,
+    partForMesh: explosion.partForMesh,
     onStrokeStart() {
       if (explosion.parts.some((part) => part.progress !== part.target)) return false;
       setAutoRotate(false);
@@ -366,6 +367,7 @@ function updateCamera(now) {
 const groupButtons = new Map();
 const explodeButton = $('btn-explode');
 const drawButton = $('btn-draw');
+let panelTitleKey = 'viewer.paintTitle';
 function showPanel(panel) {
   cameraStick.reset();
   state.panel = panel;
@@ -374,7 +376,8 @@ function showPanel(panel) {
   if (panel) {
     document.body.dataset.tools = panel;
     setAutoRotate(false);
-    $('tools-title').textContent = panel === 'parts' ? '部件拆解' : '表面绘画';
+    panelTitleKey = panel === 'parts' ? 'viewer.partsTitle' : 'viewer.paintTitle';
+    $('tools-title').textContent = t(panelTitleKey);
   } else {
     delete document.body.dataset.tools;
   }
@@ -387,38 +390,52 @@ function showPanel(panel) {
 }
 
 function buildGroupButtons() {
-  for (const { id, label, detail } of explosion.categories) {
+  for (const { id, labelKey, detailKey } of explosion.categories) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'part-button';
     button.dataset.group = id;
-    button.setAttribute('aria-label', label);
-    const name = document.createElement('span');
-    name.textContent = label;
+    const heading = document.createElement('span');
+    const name = document.createTextNode('');
     const description = document.createElement('small');
-    description.textContent = detail;
-    name.append(description);
+    heading.append(name, description);
     const action = document.createElement('span');
     action.className = 'part-action';
-    button.append(name, action);
+    button.append(heading, action);
     button.addEventListener('click', () => toggleGroup(id));
     $('part-groups').append(button);
-    groupButtons.set(id, { button, action });
+    groupButtons.set(id, { button, action, name, description, labelKey, detailKey });
   }
+  translateGroupButtons();
+}
+
+function translateGroupButtons() {
+  for (const { button, name, description, labelKey, detailKey } of groupButtons.values()) {
+    const label = t(labelKey);
+    name.data = label;
+    description.textContent = t(detailKey);
+    button.setAttribute('aria-label', label);
+  }
+}
+
+function updateAssemblyText() {
+  for (const [id, { action }] of groupButtons) {
+    action.textContent = t(selectedGroups.has(id) ? 'viewer.resetGroup' : 'viewer.separateGroup');
+  }
+  const count = selectedGroups.size;
+  const separated = count > 0 && explosionDistance.valueAsNumber > 0;
+  const assemblyKey = count === 1 ? 'viewer.oneGroupSeparated' : 'viewer.groupsSeparated';
+  $('assembly-state').textContent = t(separated ? assemblyKey : 'viewer.assembled', { count });
+  explodeButton.querySelector('span').textContent = t(separated ? 'viewer.exploded' : 'viewer.explode');
 }
 
 function updateAssemblyUI() {
   const distance = explosionDistance.valueAsNumber;
-  for (const [id, { button, action }] of groupButtons) {
-    const selected = selectedGroups.has(id);
-    press(button, selected);
-    action.textContent = selected ? '复位' : '拆开';
-  }
-  $('assembly-state').textContent = selectedGroups.size && distance > 0 ? `${selectedGroups.size} 组拆开` : '已装配';
+  for (const [id, { button }] of groupButtons) press(button, selectedGroups.has(id));
   $('distance-value').value = `${distance}%`;
   $('btn-assemble-all').disabled = !selectedGroups.size;
   $('btn-separate-all').disabled = selectedGroups.size === groupButtons.size && distance > 0;
-  explodeButton.querySelector('span').textContent = selectedGroups.size && distance > 0 ? '爆炸图 · 已拆' : '爆炸图';
+  updateAssemblyText();
 }
 
 function changeExplosion() {
@@ -496,7 +513,7 @@ function toggleOutline() {
     outline = null;
   } else {
     if (triangleCount > 1_200_000) {
-      alert('模型面数较多（>120 万三角面），轮廓线可能导致卡顿，已跳过。');
+      alert(t('viewer.outlineLimit'));
       return;
     }
     const geometries = new Map();
@@ -624,6 +641,7 @@ $('btn-full').addEventListener('click', async () => {
 
 const shortcuts = { r: 'rotate', w: 'wire', g: 'grid', e: 'edges', '0': 'reset', f: 'full', s: 'shot', d: 'draw', x: 'explode' };
 window.addEventListener('keydown', (event) => {
+  if (event.target.matches?.('#viewer-language, #viewer-language *')) return;
   const key = event.key.toLowerCase();
   if (state.panel && key === 'escape') {
     $('btn-close-tools').click();
@@ -639,12 +657,27 @@ window.addEventListener('keydown', (event) => {
     $(`btn-${shortcuts[key]}`).click();
   }
 });
+let modelLoadFailed = false;
+function updateModelError() {
+  if (modelLoadFailed) $('err-msg').textContent = t('viewer.modelLoadError', { path: MODEL_URL.pathname });
+}
+
+function translateViewer() {
+  $('tools-title').textContent = t(panelTitleKey);
+  translateGroupButtons();
+  updateAssemblyText();
+  updateModelError();
+}
+
+onLanguageChange(translateViewer);
+translateViewer();
 window.addEventListener('resize', sizeRenderer);
 sizeRenderer();
 loadModel().catch((error) => {
   clearInterval(progressTimer);
   console.error(error);
+  modelLoadFailed = true;
+  updateModelError();
   $('loader').classList.add('hidden');
   $('err').style.display = 'block';
-  $('err-msg').textContent = `${MODEL_URL.pathname} — ${error?.message || 'network error'}`;
 });

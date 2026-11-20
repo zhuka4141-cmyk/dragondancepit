@@ -1,15 +1,16 @@
 import * as THREE from 'three';
-import { createSurfaceDrawing } from './drawing.js?v=surface-tools-1';
+import { createSurfaceDrawing, DrawingError } from './drawing.js?v=bilingual-1';
+import { t, onLanguageChange } from './i18n.js';
 
 const COLORS = [
-  ['#f7c948', '金黄'], ['#f26a4f', '珊瑚红'], ['#e85d75', '玫红'],
-  ['#a9d18e', '绿色'], ['#57b6c9', '青色'], ['#5271ff', '蓝色'],
-  ['#9b6cff', '紫色'], ['#f1f3f5', '白色'], ['#202a33', '深灰'],
+  ['#f7c948', 'viewer.color.gold'], ['#f26a4f', 'viewer.color.coral'], ['#e85d75', 'viewer.color.rose'],
+  ['#a9d18e', 'viewer.color.green'], ['#57b6c9', 'viewer.color.cyan'], ['#5271ff', 'viewer.color.blue'],
+  ['#9b6cff', 'viewer.color.purple'], ['#f1f3f5', 'viewer.color.white'], ['#202a33', 'viewer.color.darkGray'],
 ];
 const MODE_HINT = {
-  auto: '触控笔绘画。手指可旋转和缩放，鼠标绘画请选择画笔模式。',
-  orbit: '拖动可旋转模型，滚轮或双指可缩放。',
-  paint: '在模型表面按住拖动。用画面右下的摇杆旋转，或点 ＋／− 缩放。',
+  auto: 'viewer.paint.hintAuto',
+  orbit: 'viewer.paint.hintOrbit',
+  paint: 'viewer.paint.hintPaint',
 };
 const $ = (id) => document.getElementById(id);
 const press = (button, value) => button.setAttribute('aria-pressed', String(value));
@@ -69,7 +70,7 @@ function drawingStorage(modelKey, reportError) {
   };
 }
 
-export function createPaintTools({ surface, camera, controls, model, meshes, modelKey, modelRadius, nameForMesh, onStrokeStart, invalidate }) {
+export function createPaintTools({ surface, camera, controls, model, meshes, modelKey, modelRadius, partForMesh, onStrokeStart, invalidate }) {
   let visible = false;
   let navigating = false;
   let ready = false;
@@ -92,13 +93,23 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
   const cursor = $('brush-cursor');
   const swatches = [];
 
-  function status(message, isError = false) {
+  let currentStatus = { key: 'viewer.paint.localStorage', isError: false };
+
+  function updateStatus() {
+    const { key, isError, params, nestedKeys } = currentStatus;
+    const values = { ...params };
+    for (const [name, messageKey] of Object.entries(nestedKeys ?? {})) values[name] = t(messageKey, params);
     const element = $('paint-status');
-    element.textContent = message;
+    element.textContent = t(key, values);
     element.toggleAttribute('data-error', isError);
   }
 
-  const storage = drawingStorage(modelKey, () => status('本机保存失败，请导出涂鸦文件。', true));
+  function status(key, isError = false, params, nestedKeys) {
+    currentStatus = { key, isError, params, nestedKeys };
+    updateStatus();
+  }
+
+  const storage = drawingStorage(modelKey, () => status('viewer.paint.saveFailed', true));
   const drawing = createSurfaceDrawing({
     meshes,
     modelKey,
@@ -128,7 +139,7 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     for (const button of document.querySelectorAll('[data-paint-mode]')) {
       press(button, button.dataset.paintMode === value);
     }
-    $('paint-hint').textContent = MODE_HINT[value];
+    $('paint-hint').textContent = t(MODE_HINT[value]);
     updateControlState();
   }
 
@@ -140,21 +151,39 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
 
   function setColor(value) {
     colorInput.value = value;
-    for (const button of swatches) press(button, button.dataset.color === value);
+    for (const { button } of swatches) press(button, button.dataset.color === value);
   }
 
-  for (const [color, label] of COLORS) {
+  for (const [color, labelKey] of COLORS) {
     const button = document.createElement('button');
     button.type = 'button';
     button.dataset.color = color;
     button.style.setProperty('--swatch', color);
-    button.setAttribute('aria-label', label);
-    button.title = label;
     button.addEventListener('click', () => setColor(color));
-    swatches.push(button);
+    swatches.push({ button, labelKey });
     $('paint-swatches').append(button);
   }
   setColor(colorInput.value);
+
+  function updateEdgeText() {
+    const button = $('tool-soft');
+    button.textContent = t(soft ? 'viewer.paint.softEdge' : 'viewer.paint.hardEdge');
+    button.setAttribute('aria-label', t(soft ? 'viewer.paint.softBrush' : 'viewer.paint.hardBrush'));
+  }
+
+  function translatePaintTools() {
+    for (const { button, labelKey } of swatches) {
+      const label = t(labelKey);
+      button.setAttribute('aria-label', label);
+      button.title = label;
+    }
+    $('paint-hint').textContent = t(MODE_HINT[mode]);
+    updateEdgeText();
+    updateStatus();
+  }
+
+  onLanguageChange(translatePaintTools);
+  translatePaintTools();
 
   // The brush diameter is set relative to the model. Zoom changes only the cursor preview.
   function brushDiameter() {
@@ -198,10 +227,11 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     const diameter = stroke.diameter * diameterScale(point.pressure);
     const opacity = stroke.opacity * (point.pressure === null ? 1 : 0.35 + 0.65 * point.pressure);
     drawing.add(hit, diameter, opacity);
-    const label = nameForMesh(hit.mesh);
-    if (label && label !== stroke.lastLabel) {
-      stroke.lastLabel = label;
-      status(`${tool === 'eraser' ? '擦除' : '绘制'} · ${label}`);
+    const part = partForMesh(hit.mesh);
+    if (part && part !== stroke.lastPart) {
+      stroke.lastPart = part;
+      status(tool === 'eraser' ? 'viewer.paint.erasing' : 'viewer.paint.drawing', false,
+        { number: part.number }, { part: part.labelKey });
     }
   }
 
@@ -273,7 +303,7 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     if (event.button !== 0 || pointerId !== null || orbitPointers.size || !ready) return;
     event.preventDefault();
     if (!onStrokeStart()) {
-      status('部件移动结束后即可绘画。');
+      status('viewer.paint.waitForParts');
       return;
     }
     pointerId = event.pointerId;
@@ -321,12 +351,11 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
   $('tool-soft').addEventListener('click', (event) => {
     soft = !soft;
     press(event.currentTarget, soft);
-    event.currentTarget.textContent = soft ? '柔边' : '硬边';
-    event.currentTarget.setAttribute('aria-label', soft ? '柔边画笔' : '硬边画笔');
+    updateEdgeText();
   });
-  $('btn-undo').addEventListener('click', () => { endStroke(); drawing.undo(); status('已撤销'); });
-  $('btn-redo').addEventListener('click', () => { endStroke(); drawing.redo(); status('已重做'); });
-  $('btn-clear').addEventListener('click', () => { endStroke(); drawing.clear(); status('已清空涂鸦'); });
+  $('btn-undo').addEventListener('click', () => { endStroke(); drawing.undo(); status('viewer.paint.undone'); });
+  $('btn-redo').addEventListener('click', () => { endStroke(); drawing.redo(); status('viewer.paint.redone'); });
+  $('btn-clear').addEventListener('click', () => { endStroke(); drawing.clear(); status('viewer.paint.cleared'); });
   $('btn-export-paint').addEventListener('click', () => {
     endStroke();
     const url = URL.createObjectURL(new Blob([JSON.stringify(drawing.serialize())], { type: 'application/json' }));
@@ -335,7 +364,7 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     link.download = 'dragondance-painting.json';
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    status('已导出涂鸦');
+    status('viewer.paint.exported');
   });
   $('btn-import-paint').addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async () => {
@@ -344,7 +373,7 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     if (!file) return;
     const revision = ++importRevision;
     if (file.size > MAX_FILE_BYTES) {
-      status(`涂鸦文件最大为 ${MAX_FILE_MIB} MiB。`, true);
+      status('viewer.paint.fileSize', true, { limit: MAX_FILE_MIB });
       return;
     }
     try {
@@ -352,10 +381,14 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
       if (revision !== importRevision) return;
       endStroke();
       drawing.restore(data);
-      status('已导入涂鸦');
+      status('viewer.paint.imported');
     } catch (error) {
-      if (revision === importRevision) {
-        status(error instanceof SyntaxError ? '无法读取此 JSON 文件。' : error.message, true);
+      if (revision !== importRevision) return;
+      if (error instanceof DrawingError) status(error.key, true);
+      else if (error instanceof SyntaxError) status('viewer.paint.invalidJson', true);
+      else {
+        console.error(error);
+        status('viewer.paint.importFailed', true);
       }
     }
   });
@@ -375,13 +408,18 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     endStroke,
     isDrawing: () => pointerId !== null,
     async restoreLocal() {
-      status('正在读取本机涂鸦…');
+      status('viewer.paint.readingLocal');
       try {
         const saved = await storage.read();
         if (saved) drawing.restore(saved);
-        status(saved ? '已恢复本机涂鸦' : '涂鸦保存在本机');
+        status(saved ? 'viewer.paint.restoredLocal' : 'viewer.paint.localStorage');
       } catch (error) {
-        status(`无法恢复本机涂鸦。${error.message}`, true);
+        if (error instanceof DrawingError) {
+          status('viewer.paint.restoreFailedWithReason', true, undefined, { reason: error.key });
+        } else {
+          console.error(error);
+          status('viewer.paint.restoreFailed', true);
+        }
       } finally {
         ready = true;
         $('btn-import-paint').disabled = false;

@@ -2,18 +2,37 @@ import * as THREE from 'three';
 
 export const EXPLODE_DURATION_MS = 680;
 const MAX_EXPLOSION = 1.5;
-const CATEGORIES = [
-  { id: 'frontWing', label: '前翼', detail: '车头翼面' },
-  { id: 'rearWing', label: '后翼', detail: '尾部翼面' },
-  { id: 'wheels', label: '轮子', detail: '四轮与轮毂' },
-  { id: 'supports', label: '轮子支撑', detail: '前后支撑与圆形挡板' },
-  { id: 'halo', label: 'Halo', detail: '座舱保护架' },
-];
+const CATEGORIES = ['frontWing', 'rearWing', 'wheels', 'supports', 'halo'].map((id) => ({
+  id,
+  labelKey: `viewer.group.${id}`,
+  detailKey: `viewer.group.${id}Detail`,
+}));
 const LABELS = new Map([
   ['前挡板 (1)', '前挡板'],
   ['=>[0:1:1:9]', '车身'],
   ['=>[0:1:1:15]', '前支撑'],
   ['halo', 'Halo'],
+]);
+// Display keys are separate from the names used for CAD grouping and mesh identity.
+const PART_NAME_KEYS = new Map([
+  ['虚拟货物', 'viewer.part.cargo'],
+  ['前车轮(镜像)', 'viewer.part.frontWheels'],
+  ['后车轮', 'viewer.part.rearWheels'],
+  ['左前轮', 'viewer.part.frontLeftWheel'],
+  ['右前轮', 'viewer.part.frontRightWheel'],
+  ['左后轮', 'viewer.part.rearLeftWheel'],
+  ['右后轮', 'viewer.part.rearRightWheel'],
+  ['前挡板', 'viewer.part.frontGuard'],
+  ['后挡板', 'viewer.part.rearGuard'],
+  ['车身', 'viewer.part.body'],
+  ['前翼', 'viewer.group.frontWing'],
+  ['尾翼', 'viewer.group.rearWing'],
+  ['头盔', 'viewer.part.helmet'],
+  ['Halo', 'viewer.group.halo'],
+  ['前支撑', 'viewer.part.frontSupport'],
+  ['后支撑', 'viewer.part.rearSupport'],
+  ['co2气瓶', 'viewer.part.co2Cylinder'],
+  ['鱼钩', 'viewer.part.hook'],
 ]);
 const CAD_GROUPS = new Map([
   ['前翼', 'frontWing'],
@@ -179,7 +198,16 @@ export function createExplodedView(gltf, fittedCenter) {
       const origin = piece.object.matrixAutoUpdate
         ? piece.object.position.clone()
         : new THREE.Vector3().setFromMatrixPosition(piece.object.matrix);
-      const part = { name: piece.name, object: piece.object, meshes: piece.meshes, category, progress: 0, target: 0 };
+      const part = {
+        name: piece.name,
+        labelKey: PART_NAME_KEYS.get(piece.name) ?? 'viewer.part.generic',
+        number: parts.length + 1,
+        object: piece.object,
+        meshes: piece.meshes,
+        category,
+        progress: 0,
+        target: 0,
+      };
       parts.push(part);
       motions.set(part, { origin, offset, worldOffset, bounds: piece.bounds, from: 0, startedAt: 0, duration: 0 });
       for (const mesh of part.meshes) {

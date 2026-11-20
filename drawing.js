@@ -1,5 +1,13 @@
 /* Surface annotations live in the same local coordinates as their source mesh. */
 import * as THREE from 'three';
+import { t } from './i18n.js';
+
+export class DrawingError extends Error {
+  constructor(key) {
+    super(t(key));
+    this.key = key;
+  }
+}
 
 const FORMAT = 'dragondance-surface-drawing';
 const MAX_STROKES = 10_000;
@@ -718,31 +726,31 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
   }
 
   function validate(data) {
-    if (data?.kind !== FORMAT || data.version !== 1) throw new Error('涂鸦文件版本不兼容。');
-    if (data.modelKey !== modelKey) throw new Error('涂鸦文件与当前模型不匹配。');
-    if (!Array.isArray(data.strokes) || data.strokes.length > MAX_STROKES) throw new Error('涂鸦笔画数据不正确。');
+    if (data?.kind !== FORMAT || data.version !== 1) throw new DrawingError('viewer.drawing.invalidVersion');
+    if (data.modelKey !== modelKey) throw new DrawingError('viewer.drawing.wrongModel');
+    if (!Array.isArray(data.strokes) || data.strokes.length > MAX_STROKES) throw new DrawingError('viewer.drawing.invalidStrokes');
     let total = 0;
     const isTriple = (value) => Array.isArray(value) && value.length === 3 && [...value].every(Number.isFinite);
     return Array.from(data.strokes, (saved, order) => {
       if (typeof saved?.color !== 'string' || !COLOR.test(saved.color) || typeof saved.soft !== 'boolean' ||
           !opacityIsValid(saved.opacity) || !Array.isArray(saved.stamps) || !saved.stamps.length) {
-        throw new Error('涂鸦笔画或笔刷数据不正确。');
+        throw new DrawingError('viewer.drawing.invalidBrushStroke');
       }
       total += saved.stamps.length;
-      if (total > MAX_STAMPS) throw new Error('涂鸦文件的笔刷采样过多。');
+      if (total > MAX_STAMPS) throw new DrawingError('viewer.drawing.tooManySamples');
       const stamps = Array.from(saved.stamps, (stamp) => {
         const record = Number.isInteger(stamp?.mesh) && records[stamp.mesh];
-        if (!record) throw new Error('涂鸦文件引用了不存在的零件。');
+        if (!record) throw new DrawingError('viewer.drawing.missingPart');
         const { geometry } = record.mesh;
         const vertexLimit = geometry.index?.count ?? geometry.getAttribute('position').count;
         if (!isTriple(stamp.p) || !isTriple(stamp.n) || !Number.isInteger(stamp.face) || stamp.face < 0 ||
             stamp.face * 3 + 2 >= vertexLimit || !opacityIsValid(stamp.opacity) || stamp.opacity === 0) {
-          throw new Error('涂鸦坐标或笔刷数据不正确。');
+          throw new DrawingError('viewer.drawing.invalidCoordinates');
         }
         const point = new THREE.Vector3().fromArray(stamp.p);
         const normal = new THREE.Vector3().fromArray(stamp.n);
         if (!validLocation(record, point, stamp.diameter) || Math.abs(normal.lengthSq() - 1) > 1e-5) {
-          throw new Error('涂鸦坐标或笔刷尺寸超出模型范围。');
+          throw new DrawingError('viewer.drawing.outsideModel');
         }
         return { mesh: record.id, face: stamp.face, point, normal, diameter: stamp.diameter, opacity: stamp.opacity };
       });
@@ -759,7 +767,7 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
         for (const stamp of stamps) {
           const record = records[stamp.mesh];
           const patch = projectStamp(indexFor(record), record, stamp, MAX_VERTICES - vertices);
-          if (!patch) throw new Error('涂鸦位置不在模型表面，或涂鸦细节过多。');
+          if (!patch) throw new DrawingError('viewer.drawing.invalidSurface');
           appendPatch(stroke, record, patch, stamp, false);
           vertices += patch.values.length / VERTEX_STRIDE;
         }

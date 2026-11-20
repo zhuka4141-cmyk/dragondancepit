@@ -10,10 +10,8 @@ export class DrawingError extends Error {
 }
 
 const FORMAT = 'dragondance-surface-drawing';
-const MAX_STROKES = 10_000;
-const MAX_STAMPS = 100_000;
-const MAX_VERTICES = 3_000_000;
 const MAX_HISTORY = 100;
+const ERASER_SIDES = 48;
 const BRUSH_ALIGNMENT = 0.55;
 const VERTEX_STRIDE = 9; // local position, local normal, brush UV, sample opacity
 const COLOR = /^#[0-9a-f]{6}$/i;
@@ -224,6 +222,15 @@ function clipPolygon(input, axis, sign, limit) {
 }
 
 function touchesDisk(polygon, radius) {
+  if (polygon.length < 3) return false;
+  const [x0, y0] = polygon[0];
+  let area = 0;
+  for (let i = 1; i < polygon.length - 1; i++) {
+    const [x1, y1] = polygon[i];
+    const [x2, y2] = polygon[i + 1];
+    area += (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+  }
+  if (Math.abs(area) <= radius * radius * 1e-14) return false;
   let positive = false;
   let negative = false;
   let previous = polygon.at(-1);
@@ -274,7 +281,7 @@ function anchorFace(index, record, point, normal, hint) {
 
 // Clip source triangles against the brush box, keeping the connected patch
 // touched by the ray. Welding duplicate positions keeps smooth CAD seams closed.
-function projectStamp(index, record, stamp, vertexLimit, facesOnly = false) {
+function projectStamp(index, record, stamp, facesOnly = false) {
   const { point, normal, diameter, opacity } = stamp;
   const anchor = anchorFace(index, record, point, normal, stamp.face);
   if (!anchor) return null;
@@ -347,7 +354,12 @@ function projectStamp(index, record, stamp, vertexLimit, facesOnly = false) {
 
   const component = root(anchorEntry);
   const values = [];
-  const faces = [];
+  const triangleFaces = [];
+  if (facesOnly) {
+    const faces = new Set();
+    for (const entry of entries) if (root(entry) === component) faces.add(entry.face);
+    return { face, sign, faces, tangent, bitangent, radius, depth };
+  }
   // Shift the entire patch along the hit normal, so shared triangle edges stay together.
   const origin = point.clone().addScaledVector(normal, record.offset);
   const projected = new THREE.Vector3();
@@ -359,18 +371,92 @@ function projectStamp(index, record, stamp, vertexLimit, facesOnly = false) {
 
   for (const entry of entries) {
     if (root(entry) !== component) continue;
-    faces.push(entry.face);
-    if (facesOnly) continue;
     const { polygon } = entry;
-    if (values.length / VERTEX_STRIDE + (polygon.length - 2) * 3 > vertexLimit) return null;
     for (let i = 1; i < polygon.length - 1; i++) {
+      if (!touchesDisk([polygon[0], polygon[i], polygon[i + 1]], radius)) continue;
       emit(polygon[0]);
       emit(polygon[i]);
       emit(polygon[i + 1]);
+      triangleFaces.push(entry.face);
     }
   }
-  faces.sort((a, b) => a - b);
-  return { face, faces, values };
+  return { face, sign, values: Float64Array.from(values), triangleFaces: Uint32Array.from(triangleFaces) };
+}
+
+const eraserSides = Array.from({ length: ERASER_SIDES }, (_, i) => {
+  const angle = (i + 0.5) * 2 * Math.PI / ERASER_SIDES;
+  return [Math.cos(angle), Math.sin(angle), 0, Math.cos(Math.PI / ERASER_SIDES)];
+});
+
+function eraserPlanes(patch, sample) {
+  const { tangent, bitangent, radius, depth } = patch;
+  return [...eraserSides.map(([x, y, z, limit]) => [x, y, z, radius * limit]),
+    [0, 0, 1, depth], [0, 0, -1, depth]].map(([x, y, z, limit]) => {
+    const direction = tangent.clone().multiplyScalar(x).addScaledVector(bitangent, y).addScaledVector(sample.normal, z);
+    return [direction.x, direction.y, direction.z, limit];
+  });
+}
+
+// Keep the polygon outside each plane, and pass only its inside region to the
+// next plane. All attributes follow the same interpolation at each cut edge.
+function subtractPolygon(vertices, planes, origin) {
+  const outside = [];
+  for (const [x, y, z, limit] of planes) {
+    const tolerance = limit * 1e-10 + Number.EPSILON * Math.max(Math.abs(origin.x), Math.abs(origin.y), Math.abs(origin.z));
+    const distances = vertices.map((v) => {
+      const distance = x * (v[0] - origin.x) + y * (v[1] - origin.y) + z * (v[2] - origin.z) - limit;
+      return Math.abs(distance) <= tolerance ? 0 : distance;
+    });
+    if (distances.every((d) => d >= 0)) return null;
+    if (distances.every((d) => d <= 0)) continue;
+    const inside = [];
+    const piece = [];
+    let previous = vertices.length - 1;
+    for (let i = 0; i < vertices.length; i++) {
+      const a = distances[previous];
+      const b = distances[i];
+      if ((a > 0 && b < 0) || (a < 0 && b > 0)) {
+        const ratio = a / (a - b);
+        const cut = vertices[previous].map((value, j) => value + (vertices[i][j] - value) * ratio);
+        inside.push(cut);
+        piece.push(cut);
+      }
+      if (b <= 0) inside.push(vertices[i]);
+      if (b >= 0) piece.push(vertices[i]);
+      previous = i;
+    }
+    outside.push(piece);
+    vertices = inside;
+  }
+  // The fragment shader already discards everything outside the paint disk.
+  const uv = (polygon) => polygon.map((v) => [v[6] - 0.5, v[7] - 0.5]);
+  return touchesDisk(uv(vertices), 0.5) ? outside.filter((part) => touchesDisk(uv(part), 0.5)) : null;
+}
+
+function cutStamp(record, stamp, sample, footprint, planes) {
+  const original = stamp.patch;
+  if (original.sign !== footprint.sign || stamp.normal.dot(sample.normal) < BRUSH_ALIGNMENT) return null;
+  const { values, triangleFaces } = original;
+  const origin = sample.point.clone().addScaledVector(stamp.normal, record.offset);
+  let changed = false;
+  const retained = [];
+  const faces = [];
+  for (let i = 0; i < triangleFaces.length; i++) {
+    const start = i * VERTEX_STRIDE * 3;
+    const vertex = (j) => values.subarray(start + j * VERTEX_STRIDE, start + (j + 1) * VERTEX_STRIDE);
+    const face = triangleFaces[i];
+    const pieces = footprint.faces.has(face) && subtractPolygon([vertex(0), vertex(1), vertex(2)], planes, origin);
+    if (pieces) changed = true;
+    for (const polygon of pieces || [[vertex(0), vertex(1), vertex(2)]]) {
+      for (let j = 1; j < polygon.length - 1; j++) {
+        retained.push(...polygon[0], ...polygon[j], ...polygon[j + 1]);
+        faces.push(face);
+      }
+    }
+  }
+  if (!changed) return null;
+  return { values: Float64Array.from(retained), triangleFaces: Uint32Array.from(faces), sign: original.sign,
+    masks: { sample, previous: original.masks } };
 }
 
 function brushMaterial(color, soft) {
@@ -407,25 +493,12 @@ function brushMaterial(color, soft) {
 }
 
 function newStroke(color, opacity, soft, order) {
-  return { color, opacity, soft, order, stamps: [], batches: new Map(), vertexCount: 0, material: null };
+  return { color, opacity, soft, order, stamps: [], batches: new Map(), paintCount: 0, material: null };
 }
 
-function appendPatch(stroke, record, patch, stamp, attach) {
-  let batch = stroke.batches.get(record);
-  const additional = patch.values.length / VERTEX_STRIDE;
-  if (!batch) {
-    stroke.material ??= brushMaterial(stroke.color, stroke.soft);
-    const decal = new THREE.Mesh(new THREE.BufferGeometry(), stroke.material);
-    decal.renderOrder = 21 + stroke.order;
-    decal.name = 'Surface drawing';
-    decal.layers.mask = record.mesh.layers.mask;
-    decal.raycast = () => {};
-    batch = { decal, count: 0, capacity: 0, stamps: [], box: new THREE.Box3(), sphere: new THREE.Sphere() };
-    stroke.batches.set(record, batch);
-    if (attach) record.mesh.add(decal);
-  }
-
-  const count = batch.count + additional;
+function appendValues(batch, values) {
+  const count = batch.count + values.length / VERTEX_STRIDE;
+  if (!values.length) return;
   if (count > batch.capacity) {
     // Three's WebGL buffers cannot resize in place. Grow geometrically and release the old allocation.
     batch.capacity = Math.max(count, 128, batch.capacity * 2);
@@ -446,8 +519,8 @@ function appendPatch(stroke, record, patch, stamp, attach) {
     batch.decal.geometry = geometry;
   }
   const offset = batch.count * VERTEX_STRIDE;
-  batch.buffer.array.set(patch.values, offset);
-  batch.buffer.addUpdateRange(offset, patch.values.length);
+  batch.buffer.array.set(values, offset);
+  batch.buffer.addUpdateRange(offset, values.length);
   batch.buffer.needsUpdate = true;
   batch.count = count;
   batch.decal.geometry.setDrawRange(0, count);
@@ -456,35 +529,59 @@ function appendPatch(stroke, record, patch, stamp, attach) {
     batch.box.expandByPoint(vertex.fromArray(batch.buffer.array, i));
   }
   batch.box.getBoundingSphere(batch.sphere);
-  stamp.face = patch.face;
-  stamp.faces = patch.faces;
+}
+
+// Keep ordinary strokes batched, and split long strokes into bounded GPU buffers.
+const BATCH_VERTICES = 16_384;
+
+function appendPatch(stroke, record, patch, stamp, attach) {
+  let batches = stroke.batches.get(record);
+  if (!batches) stroke.batches.set(record, batches = []);
+  let batch = batches.at(-1);
+  const additional = patch.values.length / VERTEX_STRIDE;
+  if (!batch || batch.count + additional > BATCH_VERTICES) {
+    stroke.material ??= brushMaterial(stroke.color, stroke.soft);
+    const decal = new THREE.Mesh(new THREE.BufferGeometry(), stroke.material);
+    decal.renderOrder = 21 + stroke.order;
+    decal.name = 'Surface drawing';
+    decal.layers.mask = record.mesh.layers.mask;
+    decal.raycast = () => {};
+    batch = { decal, count: 0, capacity: 0, stamps: [], box: new THREE.Box3(), sphere: new THREE.Sphere() };
+    batches.push(batch);
+  }
+  appendValues(batch, patch.values);
+  if (attach && batch.count && !batch.decal.parent) record.mesh.add(batch.decal);
+  stamp.patch = patch;
+  stamp.batch = batch;
   batch.stamps.push(stamp);
   stroke.stamps.push(stamp);
-  stroke.vertexCount += additional;
+  if (additional) stroke.paintCount++;
+}
+
+function rebuildBatch(batch, record, attach) {
+  batch.count = 0;
+  batch.box.makeEmpty();
+  batch.buffer?.clearUpdateRanges();
+  for (const stamp of batch.stamps) appendValues(batch, stamp.patch.values);
+  if (batch.count) {
+    if (attach && !batch.decal.parent) record.mesh.add(batch.decal);
+  } else {
+    batch.decal.geometry.setDrawRange(0, 0);
+    batch.decal.removeFromParent();
+  }
 }
 
 function setAttached(stroke, attached) {
-  for (const [record, { decal }] of stroke.batches) {
-    if (attached && decal.parent !== record.mesh) record.mesh.add(decal);
+  for (const [record, batches] of stroke.batches) for (const { decal, count } of batches) {
+    if (attached && count && decal.parent !== record.mesh) record.mesh.add(decal);
     else if (!attached) decal.removeFromParent();
   }
 }
 
 function disposeStroke(stroke) {
   setAttached(stroke, false);
-  for (const { decal } of stroke.batches.values()) decal.geometry.dispose();
+  for (const batches of stroke.batches.values()) for (const { decal } of batches) decal.geometry.dispose();
   stroke.material?.dispose();
-}
-
-function shareFace(a, b) {
-  let i = 0;
-  let j = 0;
-  while (i < a.length && j < b.length) {
-    if (a[i] === b[j]) return true;
-    if (a[i] < b[j]) i++;
-    else j++;
-  }
-  return false;
 }
 
 function validLocation(record, point, diameter) {
@@ -515,10 +612,6 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
   const scratch = new THREE.Vector3();
   let current = null;
   let nextOrder = 0;
-  let stampCount = 0;
-  let vertexCount = 0;
-  let retainedStamps = 0;
-  let retainedVertices = 0;
   const known = new Set();
   const visible = new Set();
   const history = [];
@@ -568,15 +661,7 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
     if (showing === visible.has(stroke)) return;
     if (showing) visible.add(stroke);
     else visible.delete(stroke);
-    stampCount += stroke.stamps.length * (showing ? 1 : -1);
-    vertexCount += stroke.vertexCount * (showing ? 1 : -1);
     setAttached(stroke, showing);
-  }
-
-  function remember(stroke) {
-    known.add(stroke);
-    retainedStamps += stroke.stamps.length;
-    retainedVertices += stroke.vertexCount;
   }
 
   function discardExpiredStrokes() {
@@ -586,8 +671,6 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
       if (retained.has(stroke)) continue;
       disposeStroke(stroke);
       known.delete(stroke);
-      retainedStamps -= stroke.stamps.length;
-      retainedVertices -= stroke.vertexCount;
     }
   }
 
@@ -599,12 +682,6 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
       future.length = 0;
       discardExpiredStrokes();
     }
-    // Keep one full drawing's worth of mesh data for undo in addition to visible work.
-    while (history.length > 1 && (retainedStamps - stampCount > MAX_STAMPS ||
-           retainedVertices - vertexCount > MAX_VERTICES)) {
-      history.shift();
-      discardExpiredStrokes();
-    }
     notify();
   }
 
@@ -614,12 +691,11 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
     current = null;
     if (gesture.erased) {
       if (!gesture.erased.size) return false;
-      const strokes = Array.from(gesture.erased);
-      for (const stroke of strokes) setVisible(stroke, false);
-      commit({ strokes, added: false });
+      const changes = Array.from(gesture.erased.values());
+      commit({ strokes: Array.from(new Set(changes.map(({ stroke }) => stroke))), changes });
     } else {
       if (!gesture.stroke.stamps.length) return false;
-      remember(gesture.stroke);
+      known.add(gesture.stroke);
       setVisible(gesture.stroke, true);
       commit({ strokes: [gesture.stroke], added: true });
     }
@@ -628,7 +704,7 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
 
   function begin({ color = '#ffcb66', opacity = 1, soft = true, tool = 'brush' } = {}) {
     end();
-    if (tool === 'erase' || tool === 'eraser') current = { erased: new Set() };
+    if (tool === 'erase' || tool === 'eraser') current = { erased: new Map() };
     else {
       if (typeof color !== 'string' || !COLOR.test(color) || !opacityIsValid(opacity)) return false;
       current = { stroke: newStroke(color.toLowerCase(), opacity, Boolean(soft), nextOrder++) };
@@ -638,20 +714,42 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
 
   function erase(record, stamp) {
     if (!visible.size) return false;
-    const patch = projectStamp(indexFor(record), record, stamp, 0, true);
-    if (!patch) return false;
-    let target = null;
+    const footprint = projectStamp(indexFor(record), record, stamp, true);
+    if (!footprint) return false;
+    stamp.face = footprint.face;
+    const planes = eraserPlanes(footprint, stamp);
+    const updates = [];
     for (const stroke of visible) {
-      if (current.erased.has(stroke) || (target && target.order > stroke.order)) continue;
-      const batch = stroke.batches.get(record);
-      if (batch?.stamps.some((paint) => paint.point.distanceToSquared(stamp.point) <=
-          ((paint.diameter + stamp.diameter) / 2) ** 2 &&
-          paint.normal.dot(stamp.normal) > BRUSH_ALIGNMENT && shareFace(paint.faces, patch.faces))) target = stroke;
+      for (const batch of stroke.batches.get(record) ?? []) {
+        // The projected prism is contained in this sphere, including its depth.
+        if (!batch.count || batch.box.distanceToPoint(stamp.point) > Math.hypot(footprint.radius, footprint.depth) + record.offset) continue;
+        for (const paint of batch.stamps) {
+          if (!paint.patch.values.length || paint.point.distanceToSquared(stamp.point) >
+              (0.5 * Math.hypot(1, 0.6) * (paint.diameter + stamp.diameter)) ** 2) continue;
+          const after = cutStamp(record, paint, stamp, footprint, planes);
+          if (!after) continue;
+          const change = current.erased.get(paint) ?? { stroke, paint, before: paint.patch };
+          change.after = after;
+          current.erased.set(paint, change);
+          updates.push(change);
+        }
+      }
     }
-    if (!target) return false;
-    current.erased.add(target);
-    setAttached(target, false);
-    return true;
+    applyErasures(updates, 'after');
+    return updates.length > 0;
+  }
+
+  function applyErasures(changes, side) {
+    const dirty = new Map();
+    const strokes = new Set();
+    for (const { stroke, paint, [side]: patch } of changes) {
+      stroke.paintCount += Number(patch.values.length > 0) - Number(paint.patch.values.length > 0);
+      paint.patch = patch;
+      dirty.set(paint.batch, records[paint.mesh]);
+      strokes.add(stroke);
+    }
+    for (const [batch, record] of dirty) rebuildBatch(batch, record, true);
+    for (const stroke of strokes) setVisible(stroke, stroke.paintCount > 0);
   }
 
   function add(hit, worldDiameter, opacity = current?.stroke?.opacity ?? 1) {
@@ -666,10 +764,10 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
     const stamp = { point: new THREE.Vector3().copy(hit.point), normal, diameter, opacity, face: hitFaces.get(hit), mesh: record.id };
     if (current.erased) return erase(record, stamp);
     const { stroke } = current;
-    if (!opacityIsValid(opacity) || opacity === 0 || visible.size >= MAX_STROKES ||
-        stampCount + stroke.stamps.length >= MAX_STAMPS) return false;
-    const patch = projectStamp(indexFor(record), record, stamp, MAX_VERTICES - vertexCount - stroke.vertexCount);
-    if (!patch) return false;
+    if (!opacityIsValid(opacity) || opacity === 0) return false;
+    const patch = projectStamp(indexFor(record), record, stamp);
+    if (!patch?.values.length) return false;
+    stamp.face = patch.face;
     appendPatch(stroke, record, patch, stamp, true);
     return true;
   }
@@ -678,7 +776,8 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
     end();
     const action = history.pop();
     if (!action) return false;
-    for (const stroke of action.strokes) setVisible(stroke, !action.added);
+    if (action.changes) applyErasures(action.changes, 'before');
+    else for (const stroke of action.strokes) setVisible(stroke, !action.added);
     future.push(action);
     notify();
     return true;
@@ -688,7 +787,8 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
     end();
     const action = future.pop();
     if (!action) return false;
-    for (const stroke of action.strokes) setVisible(stroke, action.added);
+    if (action.changes) applyErasures(action.changes, 'after');
+    else for (const stroke of action.strokes) setVisible(stroke, action.added);
     history.push(action);
     notify();
     return true;
@@ -705,71 +805,97 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
 
   function serialize() {
     const vector = (value) => value.toArray().map((component) => Object.is(component, -0) ? 0 : component);
-    return {
-      kind: FORMAT,
-      version: 1,
-      modelKey,
-      strokes: Array.from(visible).sort((a, b) => a.order - b.order).map((stroke) => ({
-        color: stroke.color,
-        opacity: stroke.opacity,
-        soft: stroke.soft,
-        stamps: stroke.stamps.map((stamp) => ({
-          mesh: stamp.mesh,
-          face: stamp.face,
-          p: vector(stamp.point),
-          n: vector(stamp.normal),
-          diameter: stamp.diameter,
-          opacity: stamp.opacity,
-        })),
-      })),
-    };
+    const erasers = [];
+    const ids = new Map();
+    const location = (sample) => ({
+      mesh: sample.mesh, face: sample.face, p: vector(sample.point), n: vector(sample.normal), diameter: sample.diameter,
+    });
+    const strokes = Array.from(visible).sort((a, b) => a.order - b.order).map((stroke) => ({
+      color: stroke.color,
+      opacity: stroke.opacity,
+      soft: stroke.soft,
+      stamps: stroke.stamps.filter((stamp) => stamp.patch.values.length).map((stamp) => {
+        const saved = { ...location(stamp), opacity: stamp.opacity };
+        if (stamp.patch.masks) {
+          const masks = [];
+          for (let entry = stamp.patch.masks; entry; entry = entry.previous) masks.push(entry.sample);
+          saved.masks = masks.reverse().map((sample) => {
+            if (!ids.has(sample)) {
+              ids.set(sample, erasers.length);
+              erasers.push(location(sample));
+            }
+            return ids.get(sample);
+          });
+        }
+        return saved;
+      }),
+    }));
+    return { kind: FORMAT, version: 1, modelKey, strokes, ...(erasers.length ? { erasers } : {}) };
   }
 
   function validate(data) {
     if (data?.kind !== FORMAT || data.version !== 1) throw new DrawingError('viewer.drawing.invalidVersion');
     if (data.modelKey !== modelKey) throw new DrawingError('viewer.drawing.wrongModel');
-    if (!Array.isArray(data.strokes) || data.strokes.length > MAX_STROKES) throw new DrawingError('viewer.drawing.invalidStrokes');
-    let total = 0;
+    if (!Array.isArray(data.strokes)) throw new DrawingError('viewer.drawing.invalidStrokes');
     const isTriple = (value) => Array.isArray(value) && value.length === 3 && [...value].every(Number.isFinite);
-    return Array.from(data.strokes, (saved, order) => {
+    function location(sample) {
+      const record = Number.isInteger(sample?.mesh) && records[sample.mesh];
+      if (!record) throw new DrawingError('viewer.drawing.missingPart');
+      const { geometry } = record.mesh;
+      const vertexLimit = geometry.index?.count ?? geometry.getAttribute('position').count;
+      if (!isTriple(sample.p) || !isTriple(sample.n) || !Number.isInteger(sample.face) || sample.face < 0 ||
+          sample.face * 3 + 2 >= vertexLimit) throw new DrawingError('viewer.drawing.invalidCoordinates');
+      const point = new THREE.Vector3().fromArray(sample.p);
+      const normal = new THREE.Vector3().fromArray(sample.n);
+      if (!validLocation(record, point, sample.diameter) || Math.abs(normal.lengthSq() - 1) > 1e-5) {
+        throw new DrawingError('viewer.drawing.outsideModel');
+      }
+      return { mesh: record.id, face: sample.face, point, normal, diameter: sample.diameter };
+    }
+    const invalidMask = () => new DrawingError('viewer.drawing.invalidCoordinates');
+    if ('erasers' in data && !Array.isArray(data.erasers)) throw invalidMask();
+    const erasers = Array.from(data.erasers ?? [], location);
+    const strokes = Array.from(data.strokes, (saved, order) => {
       if (typeof saved?.color !== 'string' || !COLOR.test(saved.color) || typeof saved.soft !== 'boolean' ||
           !opacityIsValid(saved.opacity) || !Array.isArray(saved.stamps) || !saved.stamps.length) {
         throw new DrawingError('viewer.drawing.invalidBrushStroke');
       }
-      total += saved.stamps.length;
-      if (total > MAX_STAMPS) throw new DrawingError('viewer.drawing.tooManySamples');
       const stamps = Array.from(saved.stamps, (stamp) => {
-        const record = Number.isInteger(stamp?.mesh) && records[stamp.mesh];
-        if (!record) throw new DrawingError('viewer.drawing.missingPart');
-        const { geometry } = record.mesh;
-        const vertexLimit = geometry.index?.count ?? geometry.getAttribute('position').count;
-        if (!isTriple(stamp.p) || !isTriple(stamp.n) || !Number.isInteger(stamp.face) || stamp.face < 0 ||
-            stamp.face * 3 + 2 >= vertexLimit || !opacityIsValid(stamp.opacity) || stamp.opacity === 0) {
-          throw new DrawingError('viewer.drawing.invalidCoordinates');
-        }
-        const point = new THREE.Vector3().fromArray(stamp.p);
-        const normal = new THREE.Vector3().fromArray(stamp.n);
-        if (!validLocation(record, point, stamp.diameter) || Math.abs(normal.lengthSq() - 1) > 1e-5) {
-          throw new DrawingError('viewer.drawing.outsideModel');
-        }
-        return { mesh: record.id, face: stamp.face, point, normal, diameter: stamp.diameter, opacity: stamp.opacity };
+        const sample = location(stamp);
+        if (!opacityIsValid(stamp.opacity) || stamp.opacity === 0) throw invalidMask();
+        if ('masks' in stamp && !Array.isArray(stamp.masks)) throw invalidMask();
+        const masks = Array.from(stamp.masks ?? [], (id) => {
+          if (!Number.isSafeInteger(id) || id < 0 || erasers[id]?.mesh !== sample.mesh) throw invalidMask();
+          return erasers[id];
+        });
+        return { ...sample, opacity: stamp.opacity, masks };
       });
       return { stroke: newStroke(saved.color, saved.opacity, saved.soft, order), stamps };
     });
+    return { strokes, erasers };
   }
 
   function restore(data) {
-    const prepared = validate(data);
+    const { strokes: prepared, erasers } = validate(data);
     // Build detached meshes first. A corrupt stamp cannot remove the current work or history.
-    let vertices = 0;
+    const footprints = new Map();
     try {
+      for (const sample of erasers) {
+        const record = records[sample.mesh];
+        const footprint = projectStamp(indexFor(record), record, sample, true);
+        if (!footprint) throw new DrawingError('viewer.drawing.invalidSurface');
+        footprints.set(sample, { footprint, planes: eraserPlanes(footprint, sample) });
+      }
       for (const { stroke, stamps } of prepared) {
-        for (const stamp of stamps) {
+        for (const { masks, ...stamp } of stamps) {
           const record = records[stamp.mesh];
-          const patch = projectStamp(indexFor(record), record, stamp, MAX_VERTICES - vertices);
-          if (!patch) throw new DrawingError('viewer.drawing.invalidSurface');
-          appendPatch(stroke, record, patch, stamp, false);
-          vertices += patch.values.length / VERTEX_STRIDE;
+          stamp.patch = projectStamp(indexFor(record), record, stamp);
+          if (!stamp.patch?.values.length) throw new DrawingError('viewer.drawing.invalidSurface');
+          for (const sample of masks) {
+            const { footprint, planes } = footprints.get(sample);
+            stamp.patch = cutStamp(record, stamp, sample, footprint, planes) ?? stamp.patch;
+          }
+          if (stamp.patch.values.length) appendPatch(stroke, record, stamp.patch, stamp, false);
         }
       }
     } catch (error) {
@@ -783,13 +909,10 @@ export function createSurfaceDrawing({ meshes, modelKey, onChange = () => {} }) 
     visible.clear();
     history.length = 0;
     future.length = 0;
-    stampCount = 0;
-    vertexCount = 0;
-    retainedStamps = 0;
-    retainedVertices = 0;
     nextOrder = prepared.length;
     for (const { stroke } of prepared) {
-      remember(stroke);
+      if (!stroke.paintCount) continue;
+      known.add(stroke);
       setVisible(stroke, true);
       history.push({ strokes: [stroke], added: true });
     }

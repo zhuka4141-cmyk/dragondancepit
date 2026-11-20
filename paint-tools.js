@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { createSurfaceDrawing, DrawingError } from './drawing.js?v=bilingual-1';
+import { createSurfaceDrawing, DrawingError } from './drawing.js?v=local-eraser-1';
 import { t, onLanguageChange } from './i18n.js';
 
 const COLORS = [
@@ -14,8 +14,6 @@ const MODE_HINT = {
 };
 const $ = (id) => document.getElementById(id);
 const press = (button, value) => button.setAttribute('aria-pressed', String(value));
-const MAX_FILE_MIB = 32;
-const MAX_FILE_BYTES = MAX_FILE_MIB * 1024 * 1024;
 
 function drawingStorage(modelKey, reportError) {
   const key = `dragondance-surface-paint:${modelKey}`;
@@ -139,7 +137,7 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     for (const button of document.querySelectorAll('[data-paint-mode]')) {
       press(button, button.dataset.paintMode === value);
     }
-    $('paint-hint').textContent = t(MODE_HINT[value]);
+    updateHint();
     updateControlState();
   }
 
@@ -147,6 +145,12 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     tool = value;
     press($('tool-brush'), value === 'brush');
     press($('tool-eraser'), value === 'eraser');
+    updateHint();
+  }
+
+  function updateHint() {
+    const key = tool === 'eraser' && mode !== 'orbit' ? 'viewer.paint.eraserHint' : MODE_HINT[mode];
+    $('paint-hint').textContent = t(key);
   }
 
   function setColor(value) {
@@ -177,7 +181,7 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
       button.setAttribute('aria-label', label);
       button.title = label;
     }
-    $('paint-hint').textContent = t(MODE_HINT[mode]);
+    updateHint();
     updateEdgeText();
     updateStatus();
   }
@@ -372,10 +376,6 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     fileInput.value = '';
     if (!file) return;
     const revision = ++importRevision;
-    if (file.size > MAX_FILE_BYTES) {
-      status('viewer.paint.fileSize', true, { limit: MAX_FILE_MIB });
-      return;
-    }
     try {
       const data = JSON.parse(await file.text());
       if (revision !== importRevision) return;

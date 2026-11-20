@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { createPaintTools } from './paint-tools.js?v=bilingual-1';
+import { createPaintTools } from './paint-tools.js?v=local-eraser-1';
 import { createCameraStick } from './camera-stick.js?v=paint-stick-1';
 import { createExplodedView, EXPLODE_DURATION_MS } from './exploded-view.js?v=bilingual-1';
 import { t, onLanguageChange } from './i18n.js';

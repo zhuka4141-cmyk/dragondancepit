@@ -3,7 +3,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { createPaintTools } from './paint-tools.js?v=surface-tools-1';
+import { createPaintTools } from './paint-tools.js?v=paint-stick-1';
+import { createCameraStick } from './camera-stick.js?v=paint-stick-1';
 import { createExplodedView, EXPLODE_DURATION_MS } from './exploded-view.js?v=surface-tools-1';
 
 const MODEL_URL = new URL('./model/dragondance.glb', import.meta.url);
@@ -37,7 +38,7 @@ renderer.setClearAlpha(0);
 renderer.autoClear = false;
 const surface = renderer.domElement;
 surface.addEventListener('webglcontextrestored', invalidate);
-stage.append(surface);
+stage.prepend(surface);
 
 const scene = new THREE.Scene();
 const camera = new THREE.OrthographicCamera(-5, 5, 5, -5, 0.01, 20000);
@@ -207,6 +208,7 @@ function sizeRenderer() {
   const height = Math.max(1, stage.clientHeight);
   const ratio = Math.min(window.devicePixelRatio || 1, 2);
   if (width !== viewWidth || height !== viewHeight || ratio !== renderer.getPixelRatio()) {
+    cameraStick.reset();
     paintTools?.endStroke();
     viewWidth = width;
     viewHeight = height;
@@ -238,12 +240,68 @@ function setAutoRotate(enabled) {
   invalidate();
 }
 
+/* ---------------- 绘画视角摇杆 ---------------- */
+const paintCamera = $('paint-camera');
+const stickOffset = new THREE.Vector3();
+const stickAngles = new THREE.Spherical();
+
+function preparePaintCamera() {
+  if (state.panel !== 'paint' || paintTools.isDrawing() || pointersDown.size) return false;
+  setAutoRotate(false);
+  controls.autoRotate = false;
+  viewTween = frameTween = null;
+
+  // Consume pending orbit damping while keeping the current camera pose.
+  const position = camera.position.clone();
+  const target = controls.target.clone();
+  const damping = controls.enableDamping;
+  controls.enableDamping = false;
+  controls.update();
+  controls.enableDamping = damping;
+  controls.target.copy(target);
+  camera.position.copy(position);
+  camera.lookAt(target);
+  return true;
+}
+
+const cameraStick = createCameraStick($('camera-stick'), {
+  onStart() {
+    if (!preparePaintCamera()) return false;
+    selectView(null);
+    paintTools.setNavigating(true);
+    return true;
+  },
+  onEnd() { paintTools.setNavigating(false); },
+});
+
+function orbitFromStick(dt) {
+  const { x, y } = cameraStick.direction;
+  if (!x && !y) return;
+  stickOffset.subVectors(camera.position, controls.target);
+  stickAngles.setFromVector3(stickOffset);
+  stickAngles.theta -= x * 2.25 * dt;
+  stickAngles.phi -= y * 1.7 * dt;
+  stickAngles.phi = THREE.MathUtils.clamp(stickAngles.phi, controls.minPolarAngle, controls.maxPolarAngle);
+  stickAngles.makeSafe();
+  camera.position.setFromSpherical(stickAngles).add(controls.target);
+  camera.lookAt(controls.target);
+  invalidate();
+}
+
+function zoomPaintCamera(factor) {
+  if (cameraStick.isActive() || !preparePaintCamera()) return;
+  camera.zoom = THREE.MathUtils.clamp(camera.zoom * factor, controls.minZoom, controls.maxZoom);
+  camera.updateProjectionMatrix();
+  invalidate();
+}
+
 const explosionDistance = $('explode-distance');
 function selectionSphere() {
   return explosion.getBounds(selectedGroups, explosionDistance.valueAsNumber / 100).getBoundingSphere(new THREE.Sphere());
 }
 
 function moveView(view, reset = false) {
+  cameraStick.reset();
   paintTools.endStroke();
   setAutoRotate(false);
   selectView(view);
@@ -308,8 +366,10 @@ const groupButtons = new Map();
 const explodeButton = $('btn-explode');
 const drawButton = $('btn-draw');
 function showPanel(panel) {
+  cameraStick.reset();
   state.panel = panel;
   paintTools.setVisible(panel === 'paint');
+  paintCamera.hidden = panel !== 'paint';
   if (panel) {
     document.body.dataset.tools = panel;
     setAutoRotate(false);
@@ -499,8 +559,11 @@ function animate(now) {
       explosion.update(now);
       invalidate();
     }
-    controls.autoRotate = !viewTween && state.autoRotate && !paintTools?.isDrawing();
-    if (!paintTools?.isDrawing()) controls.update(dt);
+    const holdingStick = cameraStick.isActive();
+    const drawing = paintTools.isDrawing();
+    controls.autoRotate = !holdingStick && !drawing && !viewTween && state.autoRotate;
+    if (holdingStick) orbitFromStick(dt);
+    else if (!drawing) controls.update(dt);
     updateCamera(now);
   }
   if (!dirty) return;
@@ -515,6 +578,9 @@ requestAnimationFrame(animate);
 for (const button of viewButtons) button.addEventListener('click', () => moveView(button.dataset.view));
 explodeButton.addEventListener('click', () => showPanel(state.panel === 'parts' ? null : 'parts'));
 drawButton.addEventListener('click', () => showPanel(state.panel === 'paint' ? null : 'paint'));
+const paintZoomStep = 1.25;
+$('paint-zoom-in').addEventListener('click', () => zoomPaintCamera(paintZoomStep));
+$('paint-zoom-out').addEventListener('click', () => zoomPaintCamera(1 / paintZoomStep));
 $('btn-close-tools').addEventListener('click', () => {
   const opener = state.panel === 'parts' ? explodeButton : drawButton;
   showPanel(null);

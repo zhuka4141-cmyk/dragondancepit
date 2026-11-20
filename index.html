@@ -37,6 +37,26 @@
   #stage canvas.is-painting{cursor:crosshair}
   #brush-cursor{position:fixed;z-index:2;pointer-events:none;transform:translate(-50%,-50%);
     border:1px solid var(--brush-color,#fff);border-radius:50%;box-shadow:0 0 0 1px #080b12;font-size:0}
+  #paint-camera{position:absolute;right:20px;bottom:116px;z-index:3;display:flex;align-items:center;gap:8px;pointer-events:none}
+  #paint-camera button{pointer-events:auto}
+  #camera-stick{position:relative;width:88px;height:88px;padding:0;border-radius:50%;touch-action:none;
+    user-select:none;-webkit-user-select:none;cursor:grab;overflow:hidden;
+    background:rgba(16,22,34,.95);border-color:rgba(125,226,195,.38);box-shadow:var(--shadow)}
+  #camera-stick:hover,#camera-stick.is-held{transform:none;border-color:var(--accent-2)}
+  #camera-stick.is-held{cursor:grabbing}
+  .stick-mark{position:absolute;color:var(--txt-dim);font:12px/1 sans-serif;pointer-events:none}
+  .stick-up,.stick-down{left:50%;transform:translateX(-50%)}
+  .stick-up{top:4px}.stick-down{bottom:4px}
+  .stick-left,.stick-right{top:50%;transform:translateY(-50%)}
+  .stick-left{left:5px}.stick-right{right:5px}
+  #stick-thumb{position:absolute;top:50%;left:50%;width:36%;aspect-ratio:1;border-radius:50%;
+    transform:translate(calc(-50% + var(--stick-x, 0px)),calc(-50% + var(--stick-y, 0px)));
+    border:1px solid var(--accent-2);background:#21403d;box-shadow:0 3px 10px rgba(0,0,0,.5);
+    pointer-events:none;transition:transform .12s ease-out}
+  #camera-stick.is-held #stick-thumb{background:#37675e;transition:none}
+  .paint-zoom{display:grid;gap:4px}
+  .paint-zoom button{width:44px;height:44px;padding:0;font-size:20px;line-height:1;touch-action:manipulation;
+    background:rgba(16,22,34,.95);border-color:rgba(125,226,195,.38)}
   [hidden]{display:none!important}
 
   /* ---------- 加载 ---------- */
@@ -179,6 +199,8 @@
     body[data-tools] #stage{left:0;bottom:calc(112px + min(36dvh, 260px))}
     body[data-tools] #title,body[data-tools] #views{display:none}
     #tool-panel{top:auto;bottom:112px;left:10px;width:calc(100% - 20px);height:min(36dvh, 260px)}
+    #paint-camera{right:10px;bottom:10px;gap:6px}
+    #camera-stick{width:72px;height:72px}
     .tool-content{touch-action:pan-y}
     #part-groups{grid-template-columns:repeat(2,minmax(0,1fr))}
     .part-button .part-action{display:none}
@@ -189,15 +211,30 @@
     body[data-tools] #stage{left:250px;bottom:0}
     body[data-tools] #title{display:none}
     #tool-panel{top:12px;bottom:68px;width:228px;height:auto}
+    #paint-camera{bottom:68px}
     #part-groups{grid-template-columns:1fr}
   }
   @media (prefers-reduced-motion:reduce){
-    button,#loader,.bar > i{transition:none}
+    button,#loader,.bar > i,#stick-thumb{transition:none}
   }
 </style>
 </head>
 <body>
-<div id="stage" aria-label="赛车三维视图"></div>
+<div id="stage" aria-label="赛车三维视图">
+  <div id="paint-camera" role="group" aria-label="绘画视角控制" hidden>
+    <button id="camera-stick" type="button" aria-label="旋转视角摇杆，按住方向键可旋转" title="拖动摇杆旋转，或按住方向键">
+      <span class="stick-mark stick-up" aria-hidden="true">▴</span>
+      <span class="stick-mark stick-right" aria-hidden="true">▸</span>
+      <span class="stick-mark stick-down" aria-hidden="true">▾</span>
+      <span class="stick-mark stick-left" aria-hidden="true">◂</span>
+      <span id="stick-thumb" aria-hidden="true"></span>
+    </button>
+    <div class="paint-zoom">
+      <button id="paint-zoom-in" type="button" aria-label="放大视角" title="放大视角">＋</button>
+      <button id="paint-zoom-out" type="button" aria-label="缩小视角" title="缩小视角">−</button>
+    </div>
+  </div>
+</div>
 <div id="brush-cursor" aria-hidden="true" hidden></div>
 
 <!-- 左上档案卡 -->
@@ -356,7 +393,7 @@
 }
 </script>
 <script type="module">
-import('./app.js?v=surface-tools-1').catch((error) => {
+import('./app.js?v=paint-stick-1').catch((error) => {
   console.error(error);
   document.getElementById('loader').classList.add('hidden');
   document.getElementById('err').style.display = 'block';

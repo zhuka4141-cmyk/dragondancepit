@@ -9,7 +9,7 @@ const COLORS = [
 const MODE_HINT = {
   auto: '触控笔绘画。手指可旋转和缩放，鼠标绘画请选择画笔模式。',
   orbit: '拖动可旋转模型，滚轮或双指可缩放。',
-  paint: '在模型表面按住拖动。要旋转模型，请切回旋转查看。',
+  paint: '在模型表面按住拖动。用画面右下的摇杆旋转，或点 ＋／− 缩放。',
 };
 const $ = (id) => document.getElementById(id);
 const press = (button, value) => button.setAttribute('aria-pressed', String(value));
@@ -71,6 +71,7 @@ function drawingStorage(modelKey, reportError) {
 
 export function createPaintTools({ surface, camera, controls, model, meshes, modelKey, modelRadius, nameForMesh, onStrokeStart, invalidate }) {
   let visible = false;
+  let navigating = false;
   let ready = false;
   let mode = 'auto';
   let tool = 'brush';
@@ -116,7 +117,7 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
   }
 
   function updateControlState() {
-    controls.enabled = pointerId === null && !(visible && mode === 'paint');
+    controls.enabled = !navigating && pointerId === null && !(visible && mode === 'paint');
     surface.classList.toggle('is-painting', visible && mode === 'paint');
   }
 
@@ -176,7 +177,7 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
   }
 
   function updateCursor(event) {
-    cursor.hidden = !usesPointer(event) || event.pointerType === 'touch';
+    cursor.hidden = navigating || !usesPointer(event) || event.pointerType === 'touch';
     if (cursor.hidden) return;
     const rect = surface.getBoundingClientRect();
     const pixels = Math.max(5, brushDiameter() * diameterScale(pointFrom(event).pressure) / worldPerPixel(rect));
@@ -258,6 +259,11 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
   }
 
   surface.addEventListener('pointerdown', (event) => {
+    if (navigating) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     if (!usesPointer(event) && pointerId === null) {
       orbitPointers.add(event.pointerId);
       return;
@@ -358,6 +364,11 @@ export function createPaintTools({ surface, camera, controls, model, meshes, mod
     setVisible(value) {
       endStroke();
       visible = value;
+      cursor.hidden = true;
+      updateControlState();
+    },
+    setNavigating(value) {
+      navigating = value;
       cursor.hidden = true;
       updateControlState();
     },

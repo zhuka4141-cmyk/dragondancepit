@@ -1,25 +1,27 @@
-/* =============================================================
-   FKU RJ · 3D 数字档案 — three.js 查看器
-   - STEP(Z-up) 模型已离线转成 GLB，这里只负责渲染与交互
-   - 所有资源使用相对路径，可直接放 GitHub Pages 的项目子目录
-   ============================================================= */
+/* Dragondance Viewer — 静态 Three.js 赛车查看器 */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { createDrawingLayer } from './drawing.js';
+import { createExplodedView, EXPLODE_DURATION_MS } from './exploded-view.js';
 
-const MODEL_URL = './model/fku_rj.glb';
+const MODEL_URL = './model/dragondance.glb';
 const $ = (id) => document.getElementById(id);
-
+const viewButtons = document.querySelectorAll('[data-view]');
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const state = {
-  autoRotate: true,
+  autoRotate: !reducedMotion.matches && !window.matchMedia('(pointer: coarse)').matches,
   wireframe: false,
   grid: true,
-  edges: false,
+  drawing: false,
 };
 
-/* ---------------- 渲染器 ---------------- */
-const stage = $('stage');
+function press(button, pressed) {
+  button.setAttribute('aria-pressed', String(pressed));
+}
+
+/* ---------------- 渲染器与绘画层 ---------------- */
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
   alpha: true,
@@ -33,445 +35,480 @@ renderer.toneMappingExposure = 1.05;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.setClearAlpha(0);
 renderer.autoClear = false;
-stage.appendChild(renderer.domElement);
+const surface = renderer.domElement;
+$('stage').prepend(surface);
+
+const brushColor = $('brush-color');
+const brushWidth = $('brush-width');
+const drawing = createDrawingLayer({
+  canvas: $('drawing-canvas'),
+  onChange(hasStrokes) {
+    $('btn-undo').disabled = !hasStrokes;
+    $('btn-clear').disabled = !hasStrokes;
+  },
+});
+drawing.setColor(brushColor.value);
+drawing.setWidth(brushWidth.valueAsNumber);
 
 /* ---------------- 场景 / 相机 ---------------- */
 const scene = new THREE.Scene();
-const initialAspect = window.innerWidth / window.innerHeight;
-const camera = new THREE.OrthographicCamera(-5 * initialAspect, 5 * initialAspect, 5, -5, 0.01, 20000);
+const camera = new THREE.OrthographicCamera(-5, 5, 5, -5, 0.01, 20000);
 camera.position.set(5, 4, 7);
-
 const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+const room = new RoomEnvironment();
+scene.environment = pmrem.fromScene(room, 0.04).texture;
+room.dispose();
+pmrem.dispose();
 
 const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
 keyLight.position.set(6, 10, 7);
 scene.add(keyLight);
-
 const fillLight = new THREE.DirectionalLight(0x9dc4ff, 1.2);
 fillLight.position.set(-8, -3, -6);
 scene.add(fillLight);
-
 const rimLight = new THREE.DirectionalLight(0xffffff, 0.9);
 rimLight.position.set(-2, 6, -9);
 scene.add(rimLight);
-
 scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x1b2433, 0.7));
 
-/* ---------------- 控制器 ---------------- */
-const controls = new OrbitControls(camera, renderer.domElement);
+const controls = new OrbitControls(camera, surface);
 controls.enableDamping = true;
 controls.dampingFactor = 0.075;
 controls.rotateSpeed = 0.85;
 controls.zoomSpeed = 0.9;
 controls.panSpeed = 0.8;
-controls.screenSpacePanning = true;
-controls.minPolarAngle = 0;
-controls.maxPolarAngle = Math.PI;      // 允许看到底面，360° 无死角
-controls.autoRotate = state.autoRotate;
 controls.autoRotateSpeed = 0.9;
-controls.target.set(0, 0, 0);
+controls.minZoom = 0.1;
+controls.maxZoom = 20;
+press($('btn-rotate'), state.autoRotate);
 
-/* ---------------- 模型容器 ---------------- */
-const modelRoot = new THREE.Group();   // 用于局部坐标修正
-const modelInner = new THREE.Group();  // 用于居中 / 缩放
-modelRoot.add(modelInner);
-scene.add(modelRoot);
-
+const model = new THREE.Group();
+scene.add(model);
 const grid = new THREE.GridHelper(10, 20, 0x3a5f8f, 0x233247);
 grid.material.transparent = true;
 grid.material.opacity = 0.55;
-grid.visible = state.grid;
 scene.add(grid);
 
-/* ---------------- 状态量 ---------------- */
-let homeDir = new THREE.Vector3(1, 0.75, 1).normalize();
-let homeDist = 10;
+// 模型经过 Z-up 转换后，鼻锥朝向 -X，车手左手侧朝向 +Z。
+const VIEW_DIRS = {
+  front: new THREE.Vector3(-1, 0, 0),
+  back: new THREE.Vector3(1, 0, 0),
+  left: new THREE.Vector3(0, 0, 1),
+  right: new THREE.Vector3(0, 0, -1),
+  top: new THREE.Vector3(0, 1, 0.0015),
+  bottom: new THREE.Vector3(0, -1, 0.0015),
+  iso: new THREE.Vector3(1, 1, 1),
+};
 const homeTarget = new THREE.Vector3();
-let modelRadius = 3;
-let tween = null;
-let edgesGroup = null;
-let lastTime = performance.now();
+const materials = new Set();
+let triangleCount = 0;
+let framingRadius = 3;
+let assembledRadius = 3;
+let explodedRadius = 3;
+let explosion = null;
+let hasExplodedParts = false;
+let viewTween = null;
+let frameTween = null;
+let outline = null;
 
 /* ---------------- 加载 ---------------- */
-let creep = 0;
-let creepTimer = setInterval(() => {
-  if (creep < 88) {
-    creep += Math.max(0.4, (88 - creep) * 0.05);
-    setProgress(creep);
-  }
+let progress = 0;
+function setProgress(value) {
+  progress = Math.min(100, Math.max(progress, value));
+  $('bar').style.width = `${progress}%`;
+  $('pct').textContent = `${Math.round(progress)}%`;
+}
+const progressTimer = setInterval(() => {
+  if (progress < 88) setProgress(progress + (88 - progress) * 0.05);
 }, 180);
 
-function setProgress(v) {
-  const p = Math.max(0, Math.min(100, v));
-  $('bar').style.width = p + '%';
-  $('pct').textContent = Math.round(p) + '%';
-}
-
-new GLTFLoader().load(
-  `${MODEL_URL}?v=20261117-63c48f80d519`,
-  onLoaded,
-  (evt) => {
-    if (evt.lengthComputable && evt.total > 0) {
-      setProgress((evt.loaded / evt.total) * 90);
-    }
-  },
-  (err) => {
-    clearInterval(creepTimer);
-    console.error(err);
-    $('loader').classList.add('hidden');
-    $('err').style.display = 'block';
-    $('err-msg').textContent = `${MODEL_URL} — ${err?.message || 'network error'}`;
-  }
-);
+new GLTFLoader().loadAsync(MODEL_URL, (event) => {
+  if (event.lengthComputable && event.total > 0) setProgress(event.loaded / event.total * 90);
+}).then(onLoaded).catch((error) => {
+  clearInterval(progressTimer);
+  console.error(error);
+  $('loader').classList.add('hidden');
+  $('err').style.display = 'block';
+  $('err-msg').textContent = `${MODEL_URL} — ${error?.message || 'network error'}`;
+});
 
 function onLoaded(gltf) {
-  clearInterval(creepTimer);
-  setProgress(100);
+  const rawSize = new THREE.Box3().setFromObject(gltf.scene).getSize(new THREE.Vector3()).multiplyScalar(1000);
 
-  const root = gltf.scene;
-
-  /* GLB 使用米；交付模型已恢复 Z-up，界面显示时换算 mm。 */
-  const rawBox = new THREE.Box3().setFromObject(root);
-  const rawSize = rawBox.getSize(new THREE.Vector3()).multiplyScalar(1000);
-
-  /* STEP 是 Z-up，three.js 是 Y-up → 绕 X 轴转 -90° */
   const orient = new THREE.Group();
   orient.rotation.x = -Math.PI / 2;
-  orient.add(root);
-  modelInner.add(orient);
-  modelInner.updateMatrixWorld(true);
-
-  /* 居中 + 归一化缩放（最大边 → 6 个单位） */
-  const box = new THREE.Box3().setFromObject(modelInner);
+  orient.add(gltf.scene);
+  model.add(orient);
+  const box = new THREE.Box3().setFromObject(model);
   const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  const maxDim = Math.max(size.x, size.y, size.z) || 1;
-  const scale = 6 / maxDim;
-  modelInner.scale.setScalar(scale);
-  modelInner.position.copy(center).multiplyScalar(-scale);
-  modelInner.updateMatrixWorld(true);
+  const scale = 6 / (Math.max(size.x, size.y, size.z) || 1);
+  model.scale.setScalar(scale);
+  model.position.copy(box.getCenter(new THREE.Vector3())).multiplyScalar(-scale);
+  model.updateMatrixWorld(true);
 
-  /* 落地网格贴合底面 */
-  const fitted = new THREE.Box3().setFromObject(modelInner);
+  const fitted = new THREE.Box3().setFromObject(model);
   const fittedSize = fitted.getSize(new THREE.Vector3());
   grid.scale.setScalar(Math.max(fittedSize.x, fittedSize.z) / 10 + 0.15);
   grid.position.y = fitted.min.y;
 
-  /* 相机包围球 */
   const sphere = fitted.getBoundingSphere(new THREE.Sphere());
-  modelRadius = sphere.radius;
-  homeDist = modelRadius * 3;
-  camera.zoom = 1;
-  fitOrthographicCamera();
-
-  camera.near = Math.max(homeDist / 5000, 0.001);
-  camera.far = homeDist * 60;
-  camera.updateProjectionMatrix();
-
-  controls.minZoom = 0.1;
-  controls.maxZoom = 20;
   homeTarget.copy(sphere.center);
+  explosion = createExplodedView(gltf, homeTarget);
+  assembledRadius = sphere.radius || 3;
+  framingRadius = assembledRadius;
+  const expanded = fitted.clone().union(explosion.explodedBounds);
+  explodedRadius = new THREE.Vector3(
+    Math.max(homeTarget.x - expanded.min.x, expanded.max.x - homeTarget.x),
+    Math.max(homeTarget.y - expanded.min.y, expanded.max.y - homeTarget.y),
+    Math.max(homeTarget.z - expanded.min.z, expanded.max.z - homeTarget.z),
+  ).length() || assembledRadius;
+  const distance = explodedRadius * 3;
+  camera.near = Math.max(distance / 5000, 0.001);
+  camera.far = distance * 60;
+  fitOrthographicCamera();
   controls.target.copy(homeTarget);
+  camera.position.copy(homeTarget).addScaledVector(VIEW_DIRS.iso.clone().normalize(), distance);
+  camera.lookAt(homeTarget);
 
-  camera.position.copy(sphere.center).addScaledVector(homeDir, homeDist);
-  camera.lookAt(controls.target);
-  controls.update();
-
-  /* 材质规范化 + 统计 */
-  let tris = 0;
-  let meshes = 0;
-  const seen = new Set();
-
-  modelInner.traverse((obj) => {
-    if (!obj.isMesh) return;
-    meshes++;
-
-    const matList = Array.isArray(obj.material) ? obj.material : [obj.material];
-    for (const m of matList) {
-      if (!m || seen.has(m)) continue;
-      seen.add(m);
-      if (m.isMeshStandardMaterial) {
-        m.envMapIntensity = 1.15;
-        if (!Number.isFinite(m.metalness) || m.metalness > 0.9) m.metalness = 0.35;
-        if (!Number.isFinite(m.roughness) || m.roughness > 0.95) m.roughness = 0.42;
-        m.side = THREE.FrontSide;
-        m.flatShading = false;
-        m.needsUpdate = true;
-      }
+  for (const mesh of explosion.meshes) {
+    const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of list) {
+      if (!material || materials.has(material)) continue;
+      materials.add(material);
+      if (!material.isMeshStandardMaterial) continue;
+      material.envMapIntensity = 1.15;
+      if (!Number.isFinite(material.metalness) || material.metalness > 0.9) material.metalness = 0.35;
+      if (!Number.isFinite(material.roughness) || material.roughness > 0.95) material.roughness = 0.42;
+      material.side = THREE.FrontSide;
+      material.flatShading = false;
+      material.needsUpdate = true;
     }
+    const { geometry } = mesh;
+    triangleCount += Math.floor((geometry.index?.count ?? geometry.attributes.position.count) / 3);
+  }
 
-    const g = obj.geometry;
-    if (g) {
-      const count = g.index ? g.index.count : g.attributes.position.count;
-      tris += Math.floor(count / 3);
-    }
-  });
-
-  /* 写档案信息：Z 向尺寸即高度，X/Y 为长宽 */
   const fmt = (n) => Math.round(n).toLocaleString('en-US');
-  const w = Math.max(rawSize.x, rawSize.y);
-  const d = Math.min(rawSize.x, rawSize.y);
-  const h = rawSize.z;
-  $('m-size').textContent = `${fmt(w)} × ${fmt(d)} × ${fmt(h)} mm`;
-  $('m-parts').textContent = meshes.toLocaleString('en-US');
-  $('m-tris').textContent = tris.toLocaleString('en-US');
-
+  $('m-size').textContent = `${fmt(Math.max(rawSize.x, rawSize.y))} × ${fmt(Math.min(rawSize.x, rawSize.y))} × ${fmt(rawSize.z)} mm`;
+  $('m-parts').textContent = fmt(explosion.parts.length);
+  $('m-tris').textContent = fmt(triangleCount);
+  for (const button of document.querySelectorAll('#views button, #dock button')) button.disabled = false;
+  $('btn-explode').disabled = explosion.parts.length < 2;
+  if (state.autoRotate) selectView(null);
+  clearInterval(progressTimer);
+  setProgress(100);
   $('loader').classList.add('hidden');
   document.body.classList.add('ready');
-
-  console.log(`[viewer] meshes=${meshes} triangles=${tris} units(step)=${w}x${d}x${h}`);
 }
 
-/* 正交投影消除近大远小；按短边适配模型，兼容手机竖屏。 */
+/* ---------------- 视角与取景 ---------------- */
 function fitOrthographicCamera() {
-  const aspect = window.innerWidth / window.innerHeight;
-  const halfHeight = modelRadius * 1.12 / Math.min(aspect, 1);
-  const halfWidth = halfHeight * aspect;
-  camera.left = -halfWidth;
-  camera.right = halfWidth;
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  const halfHeight = framingRadius * 1.12 / Math.max(0.01, Math.min(aspect, 1));
+  camera.left = -halfHeight * aspect;
+  camera.right = halfHeight * aspect;
   camera.top = halfHeight;
   camera.bottom = -halfHeight;
   camera.updateProjectionMatrix();
 }
 
-/* ---------------- 视角飞行 ---------------- */
-function flyTo(dir, duration = 750) {
-  const to = dir.clone().normalize().multiplyScalar(homeDist).add(controls.target);
-  tween = {
-    from: camera.position.clone(),
-    to,
-    t: 0,
-    duration,
+function selectView(view) {
+  for (const button of viewButtons) press(button, button.dataset.view === view);
+}
+
+function setAutoRotate(enabled) {
+  state.autoRotate = enabled;
+  press($('btn-rotate'), enabled);
+  if (enabled) selectView(null);
+}
+
+function moveView(view, reset = false) {
+  setAutoRotate(false);
+  selectView(view);
+  const from = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
+  const to = new THREE.Spherical().setFromVector3(VIEW_DIRS[view]);
+  const angle = THREE.MathUtils.euclideanModulo(to.theta - from.theta + Math.PI, 2 * Math.PI) - Math.PI;
+  const start = performance.now();
+  viewTween = {
+    from,
+    phi: to.phi,
+    angle,
+    fromTarget: controls.target.clone(),
+    toTarget: reset ? homeTarget : controls.target.clone(),
+    start,
+    duration: reducedMotion.matches ? 0 : 600,
   };
-  controls.autoRotate = false;
+  if (reset) reframe(hasExplodedParts ? explodedRadius : assembledRadius, start);
+  if (reducedMotion.matches) updateCamera(start);
 }
 
-function updateTween(dt) {
-  if (!tween) return;
-  tween.t += dt * 1000;
-  const k = Math.min(tween.t / tween.duration, 1);
-  const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
-  camera.position.lerpVectors(tween.from, tween.to, e);
-  camera.lookAt(controls.target);
-  if (k >= 1) {
-    tween = null;
-    controls.autoRotate = state.autoRotate;
+function reframe(radius, start) {
+  frameTween = {
+    fromRadius: framingRadius / camera.zoom,
+    toRadius: radius,
+    start,
+    duration: reducedMotion.matches ? 0 : EXPLODE_DURATION_MS,
+  };
+}
+
+function updateCamera(now) {
+  if (viewTween) {
+    const { from, phi, angle, fromTarget, toTarget, start, duration } = viewTween;
+    const t = duration ? THREE.MathUtils.clamp((now - start) / duration, 0, 1) : 1;
+    const eased = t * t * (3 - 2 * t);
+    controls.target.lerpVectors(fromTarget, toTarget, eased);
+    camera.position.setFromSphericalCoords(from.radius, THREE.MathUtils.lerp(from.phi, phi, eased), from.theta + angle * eased);
+    camera.position.add(controls.target);
+    camera.lookAt(controls.target);
+    if (t === 1) viewTween = null;
+  }
+  if (frameTween) {
+    const { fromRadius, toRadius, start, duration } = frameTween;
+    const t = duration ? THREE.MathUtils.clamp((now - start) / duration, 0, 1) : 1;
+    framingRadius = THREE.MathUtils.lerp(fromRadius, toRadius, t);
+    camera.zoom = 1;
+    fitOrthographicCamera();
+    if (t === 1) frameTween = null;
   }
 }
 
-const VIEW_DIRS = {
-  front: new THREE.Vector3(0, 0, 1),
-  back: new THREE.Vector3(0, 0, -1),
-  left: new THREE.Vector3(-1, 0, 0),
-  right: new THREE.Vector3(1, 0, 0),
-  top: new THREE.Vector3(0, 1, 0.0015),
-  bottom: new THREE.Vector3(0, -1, 0.0015),
-  iso: new THREE.Vector3(1, 0.75, 1),
-};
-
-/* ---------------- 线框 / 轮廓 ---------------- */
-const matCache = [];
-function collectMaterials() {
-  if (matCache.length) return;
-  const seen = new Set();
-  modelInner.traverse((o) => {
-    if (!o.isMesh) return;
-    const list = Array.isArray(o.material) ? o.material : [o.material];
-    for (const m of list) {
-      if (m && !seen.has(m)) {
-        seen.add(m);
-        matCache.push(m);
-      }
-    }
-  });
+/* ---------------- 爆炸图和点选 ---------------- */
+const explodeButton = $('btn-explode');
+function syncModeUI(restoredPart) {
+  const status = $('explode-status');
+  const remaining = explosion.parts.filter((part) => part.target === 1).length;
+  hasExplodedParts = remaining > 0;
+  press(explodeButton, hasExplodedParts);
+  explodeButton.querySelector('span').textContent = hasExplodedParts ? '全部还原' : '爆炸图';
+  explodeButton.title = hasExplodedParts ? '全部还原 (X)' : '展开部件 (X)';
+  const message = restoredPart ? `还原 ${restoredPart}。` : '';
+  status.textContent = hasExplodedParts ? `${message}点击展开的部件可还原 · 剩余 ${remaining} 件` : message;
+  status.hidden = state.drawing || !status.textContent;
+  $('drawing-tools').hidden = !state.drawing;
+  $('tool-panel').hidden = $('drawing-tools').hidden && status.hidden;
 }
 
-function applyWireframe() {
-  collectMaterials();
-  for (const m of matCache) m.wireframe = state.wireframe;
-}
-
-function toggleEdges() {
-  if (edgesGroup) {
-    scene.remove(edgesGroup);
-    edgesGroup.traverse((o) => o.geometry && o.geometry.dispose());
-    edgesGroup = null;
-    return false;
+function toggleExplosion() {
+  const opening = !hasExplodedParts;
+  const now = performance.now();
+  setAutoRotate(false);
+  explosion.setAll(opening, now, reducedMotion.matches);
+  if (opening) {
+    // 以模型中心取景，保证从已平移或放大过的视图也能看到所有部件。
+    const delta = homeTarget.clone().sub(controls.target);
+    controls.target.add(delta);
+    camera.position.add(delta);
+    viewTween = null;
   }
-  let tris = 0;
-  modelInner.traverse((o) => {
-    if (o.isMesh && o.geometry) {
-      const g = o.geometry;
-      tris += (g.index ? g.index.count : g.attributes.position.count) / 3;
-    }
-  });
-  if (tris > 1_200_000) return 'too-many';
-
-  edgesGroup = new THREE.Group();
-  const cacheGeom = new Map();
-  modelInner.traverse((o) => {
-    if (!o.isMesh || !o.geometry) return;
-    let eg = cacheGeom.get(o.geometry);
-    if (!eg) {
-      try {
-        eg = new THREE.EdgesGeometry(o.geometry, 28);
-      } catch (e) {
-        return;
-      }
-      cacheGeom.set(o.geometry, eg);
-    }
-    const line = new THREE.LineSegments(
-      eg,
-      new THREE.LineBasicMaterial({ color: 0x8ec5ff, transparent: true, opacity: 0.55 })
-    );
-    o.updateWorldMatrix(true, false);
-    line.applyMatrix4(o.matrixWorld);
-    edgesGroup.add(line);
-  });
-  scene.add(edgesGroup);
-  return true;
+  reframe(opening ? explodedRadius : assembledRadius, now);
+  syncModeUI();
 }
 
-/* ---------------- 截图 ---------------- */
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+function restorePartAt(event) {
+  if (!hasExplodedParts || state.drawing) return;
+  const rect = surface.getBoundingClientRect();
+  pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, 1 - (event.clientY - rect.top) / rect.height * 2);
+  if (Math.abs(pointer.x) > 1 || Math.abs(pointer.y) > 1) return;
+  camera.updateMatrixWorld();
+  model.updateMatrixWorld(true);
+  raycaster.setFromCamera(pointer, camera);
+  const [hit] = raycaster.intersectObjects(explosion.meshes, false);
+  const part = hit && explosion.partForMesh(hit.object);
+  if (!part || !part.target) return;
+  const now = performance.now();
+  explosion.setPart(part, false, now, reducedMotion.matches);
+  syncModeUI(part.name);
+  if (!hasExplodedParts) reframe(assembledRadius, now);
+}
+
+const pointersDown = new Set();
+let scenePress = null;
+surface.addEventListener('pointerdown', (event) => {
+  pointersDown.add(event.pointerId);
+  scenePress = pointersDown.size === 1 && event.button === 0 ? event : null;
+  if (pointersDown.size > 1 || event.button !== 0) {
+    viewTween = null;
+    selectView(null);
+  }
+});
+window.addEventListener('pointermove', (event) => {
+  if (!scenePress || event.pointerId !== scenePress.pointerId) return;
+  if (Math.hypot(event.clientX - scenePress.clientX, event.clientY - scenePress.clientY) <= 6) return;
+  scenePress = null;
+  viewTween = null;
+  selectView(null);
+});
+window.addEventListener('pointerup', (event) => {
+  pointersDown.delete(event.pointerId);
+  if (!scenePress || event.pointerId !== scenePress.pointerId) return;
+  if (Math.hypot(event.clientX - scenePress.clientX, event.clientY - scenePress.clientY) <= 6) restorePartAt(event);
+  scenePress = null;
+});
+window.addEventListener('pointercancel', (event) => {
+  pointersDown.delete(event.pointerId);
+  if (event.pointerId === scenePress?.pointerId) scenePress = null;
+});
+window.addEventListener('blur', () => {
+  pointersDown.clear();
+  scenePress = null;
+});
+
+/* ---------------- 轮廓 / 截图 ---------------- */
+function toggleOutline() {
+  if (outline) {
+    for (const line of outline.lines) line.removeFromParent();
+    for (const geometry of outline.geometries.values()) geometry.dispose();
+    outline.material.dispose();
+    outline = null;
+  } else {
+    if (triangleCount > 1_200_000) {
+      alert('模型面数较多（>120 万三角面），轮廓线可能导致卡顿，已跳过。');
+      return;
+    }
+    const geometries = new Map();
+    const material = new THREE.LineBasicMaterial({ color: 0x8ec5ff, transparent: true, opacity: 0.55 });
+    const lines = explosion.meshes.map((mesh) => {
+      if (!geometries.has(mesh.geometry)) geometries.set(mesh.geometry, new THREE.EdgesGeometry(mesh.geometry, 28));
+      const line = new THREE.LineSegments(geometries.get(mesh.geometry), material);
+      mesh.add(line);
+      return line;
+    });
+    outline = { geometries, material, lines };
+  }
+  press($('btn-edges'), Boolean(outline));
+}
+
 function screenshot() {
   renderer.clear();
   renderer.render(scene, camera);
-  const url = renderer.domElement.toDataURL('image/png');
-  const a = document.createElement('a');
-  const d = new Date();
-  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
-  a.href = url;
-  a.download = `fku-rj-${stamp}.png`;
-  a.click();
+  const image = document.createElement('canvas');
+  image.width = surface.width;
+  image.height = surface.height;
+  const context = image.getContext('2d');
+  context.drawImage(surface, 0, 0);
+  drawing.drawTo(context, image.width, image.height);
+  const stamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+  image.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `dragondance-${stamp}.png`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, 'image/png');
 }
 
-/* ---------------- 坐标轴指示器 ---------------- */
+/* ---------------- 坐标轴指示器与主循环 ---------------- */
 const gizmoScene = new THREE.Scene();
 const gizmoCam = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
 gizmoCam.position.set(0, 0, 4.2);
-gizmoCam.lookAt(0, 0, 0);
-
-const gizmoObj = new THREE.Group();
-gizmoObj.add(new THREE.AxesHelper(1.25));
-const gizmoBall = new THREE.Mesh(
-  new THREE.SphereGeometry(0.09, 12, 10),
-  new THREE.MeshBasicMaterial({ color: 0xffffff })
-);
-gizmoScene.add(gizmoObj);
-gizmoObj.add(gizmoBall);
+const gizmo = new THREE.AxesHelper(1.25);
+gizmoScene.add(gizmo);
 
 function renderGizmo() {
-  // setViewport/setScissor 接收 CSS 像素；renderer 会应用 pixelRatio。
-  const s = 104;
+  if (window.innerWidth <= 760) return;
+  const size = 104;
   const pad = 18;
-  gizmoObj.quaternion.copy(camera.quaternion).invert();
-
+  gizmo.quaternion.copy(camera.quaternion).invert();
   renderer.setScissorTest(true);
-  renderer.setViewport(window.innerWidth - s - pad, pad, s, s);
-  renderer.setScissor(window.innerWidth - s - pad, pad, s, s);
+  renderer.setViewport(window.innerWidth - size - pad, pad, size, size);
+  renderer.setScissor(window.innerWidth - size - pad, pad, size, size);
   renderer.clearDepth();
   renderer.render(gizmoScene, gizmoCam);
   renderer.setScissorTest(false);
   renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
 }
 
-/* ---------------- 主循环 ---------------- */
+let lastTime = performance.now();
 function animate(now) {
   requestAnimationFrame(animate);
-  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  const dt = Math.min(Math.max(0, now - lastTime) / 1000, 0.05);
   lastTime = now;
-
-  updateTween(dt);
-  controls.autoRotate = tween ? false : state.autoRotate;
-  controls.update(dt);
-
+  if (explosion) {
+    explosion.update(now);
+    controls.autoRotate = !state.drawing && !viewTween && state.autoRotate;
+    if (!state.drawing) controls.update(dt);
+    updateCamera(now);
+  }
   renderer.clear();
   renderer.render(scene, camera);
   renderGizmo();
 }
 requestAnimationFrame(animate);
 
-/* ---------------- 交互绑定 ---------------- */
-document.querySelectorAll('[data-view]').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    const dir = VIEW_DIRS[btn.dataset.view];
-    if (dir) flyTo(dir);
-  });
+/* ---------------- 工具栏、快捷键和窗口大小 ---------------- */
+for (const button of viewButtons) button.addEventListener('click', () => moveView(button.dataset.view));
+explodeButton.addEventListener('click', toggleExplosion);
+$('btn-draw').addEventListener('click', () => {
+  state.drawing = !state.drawing;
+  if (state.drawing) {
+    setAutoRotate(false);
+    const settled = performance.now() + EXPLODE_DURATION_MS;
+    explosion.update(settled);
+    updateCamera(settled);
+  }
+  drawing.setActive(state.drawing);
+  controls.enabled = !state.drawing;
+  press($('btn-draw'), state.drawing);
+  $('btn-draw').querySelector('span').textContent = state.drawing ? '退出绘画' : '绘画';
+  $('btn-draw').title = state.drawing ? '退出绘画 (Esc)' : '绘画 (D)';
+  explodeButton.disabled = state.drawing || explosion.parts.length < 2;
+  $('btn-rotate').disabled = state.drawing;
+  $('btn-reset').disabled = state.drawing;
+  for (const button of viewButtons) button.disabled = state.drawing;
+  syncModeUI();
 });
-
-$('btn-rotate').addEventListener('click', (e) => {
-  state.autoRotate = !state.autoRotate;
-  e.currentTarget.classList.toggle('on', state.autoRotate);
+brushColor.addEventListener('input', () => drawing.setColor(brushColor.value));
+brushWidth.addEventListener('input', () => {
+  drawing.setWidth(brushWidth.valueAsNumber);
+  $('brush-size').value = brushWidth.value;
 });
-
-$('btn-wire').addEventListener('click', (e) => {
+$('btn-undo').addEventListener('click', () => drawing.undo());
+$('btn-clear').addEventListener('click', () => drawing.clear());
+$('btn-rotate').addEventListener('click', () => setAutoRotate(!state.autoRotate));
+$('btn-wire').addEventListener('click', (event) => {
   state.wireframe = !state.wireframe;
-  applyWireframe();
-  e.currentTarget.classList.toggle('on', state.wireframe);
+  for (const material of materials) material.wireframe = state.wireframe;
+  press(event.currentTarget, state.wireframe);
 });
-
-$('btn-grid').addEventListener('click', (e) => {
+$('btn-grid').addEventListener('click', (event) => {
   state.grid = !state.grid;
   grid.visible = state.grid;
-  e.currentTarget.classList.toggle('on', state.grid);
+  press(event.currentTarget, state.grid);
 });
-
-$('btn-edges').addEventListener('click', (e) => {
-  const ok = toggleEdges();
-  if (ok === 'too-many') {
-    alert('模型面数较多（>120 万三角面），轮廓线可能导致卡顿，已跳过。');
-    return;
-  }
-  state.edges = !!edgesGroup;
-  e.currentTarget.classList.toggle('on', state.edges);
-});
-
-$('btn-reset').addEventListener('click', () => {
-  camera.zoom = 1;
-  camera.updateProjectionMatrix();
-  controls.target.copy(homeTarget);
-  flyTo(homeDir, 800);
-});
-
+$('btn-edges').addEventListener('click', toggleOutline);
+$('btn-reset').addEventListener('click', () => moveView('iso', true));
 $('btn-shot').addEventListener('click', screenshot);
-
 $('btn-full').addEventListener('click', async () => {
   try {
-    if (!document.fullscreenElement) {
-      await document.documentElement.requestFullscreen?.();
-    } else {
-      await document.exitFullscreen?.();
-    }
-  } catch (err) {
-    console.warn('当前浏览器未允许全屏:', err);
+    if (document.fullscreenElement) await document.exitFullscreen?.();
+    else await document.documentElement.requestFullscreen?.();
+  } catch (error) {
+    console.warn('当前浏览器未允许全屏:', error);
   }
 });
 
-/* ---------------- 快捷键 ---------------- */
-window.addEventListener('keydown', (e) => {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  const k = e.key.toLowerCase();
-  if (k === 'r') $('btn-rotate').click();
-  else if (k === 'w') $('btn-wire').click();
-  else if (k === 'g') $('btn-grid').click();
-  else if (k === 'e') $('btn-edges').click();
-  else if (k === '0') $('btn-reset').click();
-  else if (k === 'f') $('btn-full').click();
-  else if (k === 's') screenshot();
+const shortcuts = { r: 'rotate', w: 'wire', g: 'grid', e: 'edges', '0': 'reset', f: 'full', s: 'shot', d: 'draw', x: 'explode' };
+window.addEventListener('keydown', (event) => {
+  const key = event.key.toLowerCase();
+  if (state.drawing && key === 'escape') {
+    $('btn-draw').click();
+    return;
+  }
+  if (event.repeat || event.altKey || event.target.matches?.('textarea, [contenteditable], input:not([type="color"]):not([type="range"])')) return;
+  if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey && state.drawing) {
+    event.preventDefault();
+    drawing.undo();
+    return;
+  }
+  if (!event.target.matches?.('input') && !event.ctrlKey && !event.metaKey && Object.hasOwn(shortcuts, key)) {
+    $(`btn-${shortcuts[key]}`).click();
+  }
 });
-
-/* ---------------- 自适应 ---------------- */
 window.addEventListener('resize', () => {
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  renderer.setSize(w, h);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
   fitOrthographicCamera();
-  controls.update();
 });
-
-/* 触屏设备默认关闭自动旋转，避免误触 */
-if (window.matchMedia('(pointer: coarse)').matches) {
-  state.autoRotate = false;
-  $('btn-rotate').classList.remove('on');
-}

@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8" />
 <link rel="icon" href="data:," />
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>FKU RJ · 3D 数字档案</title>
-<meta name="description" content="STEP 模型在线 360° 无死角查看器" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dragondance Viewer</title>
+<meta name="description" content="Dragondance 赛车 3D 查看器，支持正交视角、部件爆炸图和手绘标注。" />
 <style>
   :root{
     --bg-0:#080b12;
@@ -32,6 +32,9 @@
   }
   #stage{position:fixed;inset:0}
   canvas{display:block;touch-action:none;outline:none}
+  #drawing-canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  #drawing-canvas.is-drawing{pointer-events:auto;cursor:crosshair}
+  [hidden]{display:none!important}
 
   /* ---------- 加载 ---------- */
   #loader{
@@ -92,20 +95,32 @@
     background:rgba(255,255,255,.045);border:1px solid rgba(130,170,235,.14);
     border-radius:9px;padding:8px 10px;transition:.18s ease;white-space:nowrap;
   }
-  button:hover{background:rgba(78,168,255,.16);border-color:rgba(78,168,255,.5);transform:translateY(-1px)}
+  button:enabled:hover{background:rgba(78,168,255,.16);border-color:rgba(78,168,255,.5);transform:translateY(-1px)}
   button:active{transform:translateY(0)}
-  button.on{background:rgba(78,168,255,.22);border-color:rgba(78,168,255,.7);color:#fff;
+  button[aria-pressed="true"]{background:rgba(78,168,255,.22);border-color:rgba(78,168,255,.7);color:#fff;
     box-shadow:0 0 0 1px rgba(78,168,255,.25),0 6px 18px rgba(30,120,220,.28)}
+  button:disabled{cursor:default;opacity:.42}
+  button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
-  /* ---------- 底部工具条 ---------- */
-  #dock{
-    left:50%;bottom:26px;transform:translateX(-50%);
-    padding:8px;display:flex;gap:6px;align-items:center;
-  }
-  #dock .sep{width:1px;height:22px;background:rgba(130,170,235,.16);margin:0 4px}
-  #dock button{display:flex;align-items:center;gap:7px;padding:9px 13px}
+  /* ---------- 底部工具条与绘画选项 ---------- */
+  #dock,#tool-panel{left:50%;transform:translateX(-50%);max-width:calc(100% - 20px)}
+  #dock{bottom:26px;padding:8px;display:flex;gap:8px;align-items:center}
+  #dock .dock-group{display:flex;gap:6px;align-items:center}
+  #dock .sep{width:1px;height:22px;background:rgba(130,170,235,.16)}
+  #dock button{display:flex;align-items:center;justify-content:center;gap:7px;padding:9px 12px}
+  #dock .mode-button{border-color:rgba(125,226,195,.38);color:var(--accent-2)}
+  #dock .mode-button[aria-pressed="true"]{background:rgba(125,226,195,.16);border-color:var(--accent-2);box-shadow:none}
+  #dock #btn-explode{min-width:97px}
   #dock svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.6;
     stroke-linecap:round;stroke-linejoin:round;opacity:.9}
+  #tool-panel{bottom:88px;padding:8px 12px;width:max-content}
+  #drawing-tools{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px 12px}
+  #drawing-tools label{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--txt-dim);white-space:nowrap}
+  #drawing-tools input[type="color"]{width:30px;height:30px;padding:2px;border:1px solid var(--panel-brd);
+    border-radius:6px;background:var(--bg-1);cursor:pointer}
+  #drawing-tools input[type="range"]{width:74px;margin:0;accent-color:var(--accent-2);cursor:pointer}
+  #drawing-tools output{min-width:2ch;color:var(--txt);font-variant-numeric:tabular-nums}
+  #explode-status{margin:0;color:var(--txt-dim);font-size:12px;text-align:center}
 
   /* ---------- 右下：坐标轴 ---------- */
   #gizmo-hint{
@@ -121,93 +136,133 @@
   #err h2{margin:0 0 8px;font-size:16px;color:#ff8a8a}
   #err code{font-size:11.5px;color:var(--txt-dim);word-break:break-all}
 
+  @media (max-width:960px){
+    #dock .dock-group:not(.mode-group) button span{display:none}
+    #dock button{padding:8px;min-width:38px;min-height:38px}
+  }
   @media (max-width:760px){
-    #title{top:12px;left:12px;max-width:calc(100vw - 156px);min-width:0;padding:12px 15px}
+    #title{top:12px;left:12px;max-width:calc(100vw - 154px);min-width:0;padding:12px 13px}
     #title h1{font-size:16px}
     #title .hint{display:none}
     #views{top:12px;right:12px;grid-template-columns:repeat(2,1fr);padding:8px}
-    #dock{bottom:14px;gap:4px;padding:6px}
-    #dock button{padding:8px 9px;font-size:11.5px}
-    #dock button span{display:none}
+    #dock{bottom:12px;display:grid;grid-template-columns:auto auto;gap:5px;padding:7px}
+    #dock .dock-group{justify-content:center;gap:4px}
+    #dock .mode-group{grid-column:1/-1}
+    #dock .mode-group button{flex:1}
+    #dock .sep{display:none}
+    #tool-panel{bottom:116px}
     #gizmo-hint{display:none}
+  }
+  @media (min-width:430px) and (max-width:760px) and (orientation:landscape){
+    #dock{display:flex}
+    #tool-panel{bottom:68px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    button,#loader,.bar > i{transition:none}
   }
 </style>
 </head>
 <body>
-<div id="stage"></div>
+<div id="stage">
+  <canvas id="drawing-canvas" aria-hidden="true"></canvas>
+</div>
 
 <!-- 左上档案卡 -->
 <section id="title" class="hud panel">
-  <div class="kicker">Digital Archive</div>
-  <h1>FKU RJ <span>· 3D 档案</span></h1>
+  <div class="kicker">3D 数字档案</div>
+  <h1>Dragondance <span>Viewer</span></h1>
   <div class="meta">
     <div>格式 <b id="m-format">STEP AP214 → GLB</b></div>
     <div>外包尺寸 <b id="m-size">—</b></div>
     <div>构件 <b id="m-parts">—</b> · 三角面 <b id="m-tris">—</b></div>
   </div>
-  <div class="hint">左键拖拽旋转 · 滚轮缩放 · 右键平移<br>支持 360° 全角度无死角查看</div>
+  <div class="hint">左键拖拽旋转 · 滚轮缩放 · 右键平移</div>
 </section>
 
 <!-- 右上视角 -->
-<section id="views" class="hud panel">
-  <div class="cap">Views</div>
-  <button data-view="front">前视</button>
-  <button data-view="back">后视</button>
-  <button data-view="left">左视</button>
-  <button data-view="right">右视</button>
-  <button data-view="top">俯视</button>
-  <button data-view="bottom">仰视</button>
-  <button data-view="iso" style="grid-column:1/-1">等轴测视角</button>
+<section id="views" class="hud panel" aria-labelledby="views-label">
+  <div id="views-label" class="cap">正交视角</div>
+  <button data-view="front" aria-pressed="false" disabled>前视</button>
+  <button data-view="back" aria-pressed="false" disabled>后视</button>
+  <button data-view="left" aria-pressed="false" disabled>左视</button>
+  <button data-view="right" aria-pressed="false" disabled>右视</button>
+  <button data-view="top" aria-pressed="false" disabled>俯视</button>
+  <button data-view="bottom" aria-pressed="false" disabled>仰视</button>
+  <button data-view="iso" aria-pressed="true" style="grid-column:1/-1" disabled>等轴测视角</button>
 </section>
 
-<!-- 底部工具条 -->
-<nav id="dock" class="hud panel">
-  <button id="btn-rotate" class="on" title="自动旋转 (R)">
-    <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/></svg>
-    <span>自动旋转</span>
-  </button>
-  <button id="btn-wire" title="线框 (W)">
-    <svg viewBox="0 0 24 24"><path d="M12 2 22 8v8l-10 6L2 16V8z"/><path d="M2 8l10 6 10-6M12 14v8"/></svg>
-    <span>线框</span>
-  </button>
-  <button id="btn-grid" class="on" title="网格 (G)">
-    <svg viewBox="0 0 24 24"><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>
-    <span>网格</span>
-  </button>
-  <button id="btn-edges" title="轮廓线 (E)">
-    <svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M4 12h16M12 6v12"/></svg>
-    <span>轮廓</span>
-  </button>
-  <div class="sep"></div>
-  <button id="btn-reset" title="复位视角 (0)">
-    <svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></svg>
-    <span>复位</span>
-  </button>
-  <button id="btn-shot" title="截图保存">
-    <svg viewBox="0 0 24 24"><path d="M4 8h3l2-2h6l2 2h3v11H4z"/><circle cx="12" cy="13" r="3.4"/></svg>
-    <span>截图</span>
-  </button>
-  <button id="btn-full" title="全屏">
-    <svg viewBox="0 0 24 24"><path d="M9 3H3v6M15 3h6v6M21 15v6h-6M3 15v6h6"/></svg>
-    <span>全屏</span>
-  </button>
+<div id="tool-panel" class="hud panel" hidden>
+  <div id="drawing-tools" aria-label="绘画工具" hidden>
+    <label>颜色 <input type="color" id="brush-color" value="#ffc45e" /></label>
+    <label>笔宽 <input type="range" id="brush-width" min="1" max="20" value="4" /> <output id="brush-size" for="brush-width">4</output></label>
+    <button id="btn-undo" title="撤销上一笔 (Ctrl+Z)" disabled>撤销</button>
+    <button id="btn-clear" disabled>清空</button>
+  </div>
+  <p id="explode-status" role="status" hidden></p>
+</div>
+
+<nav id="dock" class="hud panel" aria-label="查看器工具">
+  <div class="dock-group mode-group">
+    <button id="btn-explode" class="mode-button" title="展开部件 (X)" aria-pressed="false" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 9 3 3-3 3-3-3 3-3ZM4 8V4h4m8 0h4v4m0 8v4h-4m-8 0H4v-4m0 4 4-4m8-8 4-4m-4 12 4 4M4 4l4 4"/></svg>
+      <span>爆炸图</span>
+    </button>
+    <button id="btn-draw" class="mode-button" title="绘画 (D)" aria-pressed="false" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13.5 6.5 4 4m-12 8 1-4L17 4a2.83 2.83 0 0 1 4 4L10.5 18.5l-5 1Z"/><path d="M3 21h18"/></svg>
+      <span>绘画</span>
+    </button>
+  </div>
+  <div class="sep" aria-hidden="true"></div>
+  <div class="dock-group">
+    <button id="btn-rotate" title="自动旋转 (R)" aria-label="自动旋转" aria-pressed="true" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/></svg>
+      <span>自动旋转</span>
+    </button>
+    <button id="btn-wire" title="线框 (W)" aria-label="线框" aria-pressed="false" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 22 8v8l-10 6L2 16V8z"/><path d="M2 8l10 6 10-6M12 14v8"/></svg>
+      <span>线框</span>
+    </button>
+    <button id="btn-grid" title="网格 (G)" aria-label="网格" aria-pressed="true" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>
+      <span>网格</span>
+    </button>
+    <button id="btn-edges" title="轮廓线 (E)" aria-label="轮廓线" aria-pressed="false" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M4 12h16M12 6v12"/></svg>
+      <span>轮廓</span>
+    </button>
+  </div>
+  <div class="sep" aria-hidden="true"></div>
+  <div class="dock-group">
+    <button id="btn-reset" title="复位视角 (0)" aria-label="复位视角" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></svg>
+      <span>复位</span>
+    </button>
+    <button id="btn-shot" title="截图保存 (S)" aria-label="截图保存" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-2h6l2 2h3v11H4z"/><circle cx="12" cy="13" r="3.4"/></svg>
+      <span>截图</span>
+    </button>
+    <button id="btn-full" title="全屏 (F)" aria-label="全屏" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3H3v6M15 3h6v6M21 15v6h-6M3 15v6h6"/></svg>
+      <span>全屏</span>
+    </button>
+  </div>
 </nav>
 
-<div id="gizmo-hint" class="hud">Drag to orbit</div>
+<div id="gizmo-hint" class="hud">拖拽旋转</div>
 
 <!-- 加载 -->
 <div id="loader">
   <div class="ring"></div>
-  <div class="lbl">Loading Archive</div>
+  <div class="lbl">正在载入 Dragondance</div>
   <div class="bar"><i id="bar"></i></div>
   <div id="pct">0%</div>
-  <div class="sub">正在解析 STEP 几何体…</div>
+  <div class="sub">正在读取 3D 模型…</div>
 </div>
 
 <!-- 错误 -->
 <div id="err" class="hud panel">
   <h2>模型载入失败</h2>
-  <div>请确认 <code>model/fku_rj.glb</code> 已上传，并通过 HTTP 服务访问本页面（不要直接双击打开 html）。</div>
+  <div>请确认 <code>model/dragondance.glb</code> 可访问，并通过 HTTP 服务打开查看器。</div>
   <div><code id="err-msg"></code></div>
 </div>
 
@@ -220,7 +275,7 @@
 }
 </script>
 <script type="module">
-import('./app.js?v=20261117-63c48f80d519').catch((error) => {
+import('./app.js?v=dragondance-1').catch((error) => {
   console.error(error);
   document.getElementById('loader').classList.add('hidden');
   document.getElementById('err').style.display = 'block';

@@ -1,6 +1,6 @@
 # Dragondance Viewer
 
-[打开 Dragondance Viewer](https://zhuka4141-cmyk.github.io/fku-rj-viewer/)
+[打开 Dragondance Viewer](https://zhuka4141-cmyk.github.io/dragondancepit/)
 
 这是使用 Three.js 0.169.0 的静态赛车查看器。可在正交投影下切换前视、后视、左视、右视、俯视、仰视和等轴测视角。
 

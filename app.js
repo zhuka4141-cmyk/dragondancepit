@@ -279,8 +279,9 @@ function orbitFromStick(dt) {
   if (!x && !y) return;
   stickOffset.subVectors(camera.position, controls.target);
   stickAngles.setFromVector3(stickOffset);
-  stickAngles.theta -= x * 2.25 * dt;
-  stickAngles.phi -= y * 1.7 * dt;
+  // Move the camera toward the stick, so pushing up raises the viewpoint.
+  stickAngles.theta += x * 2.25 * dt;
+  stickAngles.phi += y * 1.7 * dt;
   stickAngles.phi = THREE.MathUtils.clamp(stickAngles.phi, controls.minPolarAngle, controls.maxPolarAngle);
   stickAngles.makeSafe();
   camera.position.setFromSpherical(stickAngles).add(controls.target);
